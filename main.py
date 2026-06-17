@@ -104,7 +104,7 @@ def build_and_solve_schedule():
     
     # 1. Completing the weekly hours quota for each requirement
     for req in requirements:
-        model.AddExactlyOne(sum(schedule_vars[(req['req_id'], ts['id'])] for ts in timeslots) == req['weekly_hours'])
+        model.Add(sum(schedule_vars[(req['req_id'], ts['id'])] for ts in timeslots) == req['weekly_hours'])
         # Technical note: We used a direct equality equation inside Add
         model.Add(sum(schedule_vars[(req['req_id'], ts['id'])] for ts in timeslots) == req['weekly_hours'])
 
