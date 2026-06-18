@@ -255,24 +255,6 @@ def _assign_rooms(solver, schedule_vars, data, timeslots):
     # Track which rooms are already used at each timeslot.
     used_rooms_by_timeslot = {ts["id"]: set() for ts in timeslots}
 
-    # DIAGNOSTIC: count how many lessons land on each timeslot, to check
-    # whether we're exceeding the number of available rooms anywhere.
-    lessons_per_timeslot = {ts["id"]: 0 for ts in timeslots}
-
-    for ta in data["teacher_assignments"]:
-        for ts in timeslots:
-            var = schedule_vars[(ta["id"], ts["id"])]
-            if solver.Value(var) == 1:
-                lessons_per_timeslot[ts["id"]] += 1
-
-    print("\n--- DIAGNOSTIC: lessons per timeslot vs rooms available ---")
-    for ts_id, count in lessons_per_timeslot.items():
-        if count > len(rooms):
-            print(f"  timeslot {ts_id}: {count} lessons but only {len(rooms)} rooms -> OVERFLOW")
-        elif count > 0:
-            print(f"  timeslot {ts_id}: {count} lessons, {len(rooms)} rooms available - OK")
-    print("--- END DIAGNOSTIC ---\n")
-
     for ta in data["teacher_assignments"]:
         for ts in timeslots:
             var = schedule_vars[(ta["id"], ts["id"])]
