@@ -12,11 +12,11 @@ results get added to the `results` list below.
 
 from data_access import fetch_all_data, save_schedule_run
 from csp.solver import run_csp
+from hill_climbing.solver import run_hill_climbing
 from performance import measure_performance
 
-# TODO: once written, import these the same way:
+# TODO: once written, import this the same way:
 # from genetic.solver import run_genetic
-# from hill_climbing.solver import run_hill_climbing
 # from comparator import pick_best_result
 
 
@@ -32,19 +32,27 @@ def main():
 
     results = [csp_result]
 
-    # TODO: once implemented, add the other two the same way:
-    # genetic_result = run_genetic(data)
+    print("Running Hill Climbing solver...")
+    hc_result, hc_metrics = measure_performance(run_hill_climbing, data)
+    print(f"Hill Climbing finished with status={hc_result['status']}, score={hc_result['score']}")
+    print(f"Hill Climbing performance: runtime={hc_metrics['runtime_seconds']}s, "
+          f"peak_memory={hc_metrics['peak_memory_mb']}MB")
+
+    results.append(hc_result)
+
+    # TODO: once implemented, add Genetic Algorithm the same way:
+    # genetic_result, genetic_metrics = measure_performance(run_genetic, data)
     # results.append(genetic_result)
-    #
-    # hill_climbing_result = run_hill_climbing(data)
-    # results.append(hill_climbing_result)
     #
     # best_result = pick_best_result(results)
 
-    # For now (CSP only), just treat the single result as "the best" one.
-    best_result = csp_result
+    # For now (no comparator yet), just pick the lowest score among
+    # whatever results we have (manually doing what pick_best_result will
+    # do automatically once it exists).
+    valid_results = [r for r in results if r["score"] is not None]
+    best_result = min(valid_results, key=lambda r: r["score"]) if valid_results else None
 
-    if best_result["score"] is not None:
+    if best_result is not None and best_result["score"] is not None:
         print(f"Saving best result ({best_result['algorithm']}) to the database...")
         run_id = save_schedule_run(
             algorithm=best_result["algorithm"],
