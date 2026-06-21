@@ -13,10 +13,10 @@ results get added to the `results` list below.
 from data_access import fetch_all_data, save_schedule_run
 from csp.solver import run_csp
 from hill_climbing.solver import run_hill_climbing
+from genetic.solver import run_genetic
 from performance import measure_performance
 
 # TODO: once written, import this the same way:
-# from genetic.solver import run_genetic
 # from comparator import pick_best_result
 
 
@@ -40,10 +40,15 @@ def main():
 
     results.append(hc_result)
 
-    # TODO: once implemented, add Genetic Algorithm the same way:
-    # genetic_result, genetic_metrics = measure_performance(run_genetic, data)
-    # results.append(genetic_result)
-    #
+    print("Running Genetic Algorithm solver...")
+    genetic_result, genetic_metrics = measure_performance(run_genetic, data)
+    print(f"Genetic Algorithm finished with status={genetic_result['status']}, score={genetic_result['score']}")
+    print(f"Genetic Algorithm performance: runtime={genetic_metrics['runtime_seconds']}s, "
+          f"peak_memory={genetic_metrics['peak_memory_mb']}MB")
+
+    results.append(genetic_result)
+
+    # TODO: once implemented, replace the manual min() selection below with:
     # best_result = pick_best_result(results)
 
     # For now (no comparator yet), just pick the lowest score among
