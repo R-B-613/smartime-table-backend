@@ -159,6 +159,33 @@ def fetch_all_data():
     return data
 
 
+def mark_run_as_selected(run_id: int):
+    """
+    Sets is_selected = true for the given schedule_runs.id. Intended to be
+    called by the comparator AFTER all candidate runs have already been
+    saved via save_schedule_run(), once the best one has been determined.
+
+    Does NOT unset is_selected on any other rows - if you re-run the
+    pipeline multiple times, older runs keep whatever is_selected value
+    they already had. This is intentional: is_selected marks "this run
+    was the winner OF ITS OWN comparison batch", not "this is the single
+    best run that has ever existed across all time".
+    """
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "UPDATE schedule_runs SET is_selected = true WHERE id = %s;",
+                (run_id,),
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 def save_schedule_run(algorithm: str, score: float, schedule_entries: list):
     """
     Inserts a new row into schedule_runs (with the given algorithm name and
