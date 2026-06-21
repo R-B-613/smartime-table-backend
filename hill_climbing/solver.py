@@ -273,20 +273,82 @@ def _score_schedule(schedule, data, lookups):
     return total_penalty
 
 
+def _find_conflicting_assignment_ids(schedule, data, lookups):
+    """
+    Returns the SET of assignment_ids that are currently involved in at
+    least one hard conflict (teacher double-booked OR group double-booked
+    at some shared timeslot). Used to bias neighbor selection toward
+    fixing actual problems, instead of picking moves completely at random.
+
+    This does NOT include soft-constraint or preference violations on
+    purpose - those are comparatively minor (small weights), and chasing
+    them with the same urgency as hard conflicts would dilute the repair
+    focus. Hard conflicts (10,000 each) are overwhelmingly the most
+    valuable thing to fix first.
+    """
+    teacher_assignments = data["teacher_assignments"]
+    requirement_by_id = lookups["requirement_by_id"]
+
+    conflicting_ids = set()
+
+    # Teacher double-booking: for each teacher, find timeslots used more
+    # than once, then mark EVERY assignment of that teacher that uses that
+    # timeslot as conflicting (we don't know which specific occurrence is
+    # "the problem" - any of them moving could resolve it).
+    assignments_by_teacher = {}
+    for ta in teacher_assignments:
+        assignments_by_teacher.setdefault(ta["teacher_id"], []).append(ta)
+
+    for teacher_id, t_assignments in assignments_by_teacher.items():
+        timeslot_to_assignment_ids = {}
+        for ta in t_assignments:
+            for t in schedule[ta["id"]]:
+                timeslot_to_assignment_ids.setdefault(t, []).append(ta["id"])
+
+        for t, assignment_ids in timeslot_to_assignment_ids.items():
+            if len(assignment_ids) > 1:
+                conflicting_ids.update(assignment_ids)
+
+    # Student group double-booking: same idea, grouped by student_group_id.
+    assignments_by_group = {}
+    for ta in teacher_assignments:
+        req = requirement_by_id[ta["cur_requirement_id"]]
+        assignments_by_group.setdefault(req["student_group_id"], []).append(ta)
+
+    for group_id, g_assignments in assignments_by_group.items():
+        timeslot_to_assignment_ids = {}
+        for ta in g_assignments:
+            for t in schedule[ta["id"]]:
+                timeslot_to_assignment_ids.setdefault(t, []).append(ta["id"])
+
+        for t, assignment_ids in timeslot_to_assignment_ids.items():
+            if len(assignment_ids) > 1:
+                conflicting_ids.update(assignment_ids)
+
+    return conflicting_ids
+
+
 # ---------------------------------------------------------------------------
 # Neighbor generation + single climb (one hill, until no improvement found)
 # ---------------------------------------------------------------------------
 
-def _get_random_neighbor(schedule, timeslot_ids):
+def _get_random_neighbor(schedule, timeslot_ids, preferred_assignment_ids=None):
     """
     Builds ONE neighbor schedule: a copy of `schedule` with exactly one
     scheduled session moved to a different (random) timeslot.
 
+    If `preferred_assignment_ids` is given and non-empty, the assignment
+    to move is chosen from THAT set instead of from all assignments -
+    this is what lets the climb target known conflicts directly, instead
+    of searching blindly across the whole schedule.
+
     Returns a brand new schedule dict (does not mutate the input).
     """
-    # Pick a random assignment, then a random "hour slot index" within it
-    # (since one assignment can have multiple weekly hours/timeslots).
-    assignment_id = random.choice(list(schedule.keys()))
+    if preferred_assignment_ids:
+        assignment_id = random.choice(list(preferred_assignment_ids))
+    else:
+        assignment_id = random.choice(list(schedule.keys()))
+
     hour_index = random.randrange(len(schedule[assignment_id]))
 
     new_schedule = {a_id: list(timeslots) for a_id, timeslots in schedule.items()}
@@ -302,17 +364,36 @@ def _climb(initial_schedule, data, lookups, timeslot_ids, deadline):
     improves the score (a local optimum), or the overall time deadline
     is reached.
 
+    Neighbor sampling is conflict-targeted: each step, we first check
+    which assignments are currently involved in a hard conflict
+    (teacher/group double-booking). If any exist, MOST sampled neighbors
+    move one of those specifically (targeted repair), while a smaller
+    portion still sample fully at random (so soft-constraint/preference
+    improvements aren't ignored once hard conflicts are gone, and so we
+    don't get stuck only ever looking at the same few assignments).
+
     Returns (best_schedule, best_score) found during this climb.
     """
     current_schedule = initial_schedule
     current_score = _score_schedule(current_schedule, data, lookups)
 
     while time.perf_counter() < deadline:
+        conflicting_ids = _find_conflicting_assignment_ids(current_schedule, data, lookups)
+
         best_neighbor = None
         best_neighbor_score = current_score  # only accept STRICT improvements
 
-        for _ in range(NEIGHBORS_SAMPLED_PER_STEP):
-            neighbor = _get_random_neighbor(current_schedule, timeslot_ids)
+        for i in range(NEIGHBORS_SAMPLED_PER_STEP):
+            # 80% of samples target known conflicts (if any exist), the
+            # rest sample fully at random - keeps repair focused without
+            # losing the ability to improve soft constraints once the
+            # schedule is structurally clean.
+            use_targeted = conflicting_ids and (i % 5 != 0)
+            neighbor = _get_random_neighbor(
+                current_schedule,
+                timeslot_ids,
+                preferred_assignment_ids=conflicting_ids if use_targeted else None,
+            )
             neighbor_score = _score_schedule(neighbor, data, lookups)
             if neighbor_score < best_neighbor_score:
                 best_neighbor = neighbor
