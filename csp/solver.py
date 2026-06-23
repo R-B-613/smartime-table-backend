@@ -52,6 +52,7 @@ from scoring_config import (
     SOFT_CONSTRAINT_WEIGHT_MULTIPLIER,
     PREFERENCE_WEIGHTS,
     OUTSIDE_HOURS_RANGE_PENALTY_PER_HOUR,
+    SUBJECT_DISTRIBUTION_PENALTY_PER_EXTRA_HOUR,
     CSP_MAX_SOLVE_SECONDS,
     ALGO_CSP,
 )
@@ -120,19 +121,15 @@ def _create_decision_variables(model, teacher_assignments, timeslots):
 
 def _add_structural_hard_constraints(model, schedule_vars, data, lookups, timeslots):
     """
-    Adds the constraints that are NEVER allowed to be broken, enforced
-    structurally (the solver cannot even propose a solution that breaks
-    these - they aren't scored, they're forbidden).
+    Adds constraints that are NEVER allowed to be broken: weekly_hours,
+    teacher/group double-booking, room-awareness, and sync_block_identity.
     """
     teacher_assignments = data["teacher_assignments"]
     requirement_by_id = lookups["requirement_by_id"]
     assignments_by_teacher = lookups["assignments_by_teacher"]
     assignments_by_group = lookups["assignments_by_group"]
 
-    # 1. Each curriculum requirement must get EXACTLY its weekly_hours,
-    #    spread across its assignment(s).
-    #    (Usually one assignment per requirement, but this works even if
-    #    a requirement is split across multiple teacher_assignments rows.)
+    # 1. Each curriculum requirement must get EXACTLY its weekly_hours.
     assignments_by_requirement = {}
     for ta in teacher_assignments:
         assignments_by_requirement.setdefault(ta["cur_requirement_id"], []).append(ta["id"])
@@ -162,34 +159,75 @@ def _add_structural_hard_constraints(model, schedule_vars, data, lookups, timesl
                 schedule_vars[(a_id, ts["id"])] for a_id in assignment_ids
             )
 
-    # NOTE: room-conflict and room-capacity constraints are intentionally
-    # skipped here for v1 (see module docstring TODO). Room assignment is
-    # currently decided AFTER solving (see _assign_rooms below), using the
-    # simplest possible rule: "any room free at that timeslot".
+    # 4. Room-awareness: limit simultaneous lessons by available rooms.
+    subject_by_id = {s["id"]: s for s in data["subjects"]}
+    room_count_by_type = {}
+    for room in data["rooms"]:
+        rt = room.get("room_type")
+        if rt is not None:
+            room_count_by_type[rt] = room_count_by_type.get(rt, 0) + 1
+
+    room_resource_groups = {}
+    for ta in teacher_assignments:
+        req = requirement_by_id[ta["cur_requirement_id"]]
+        subject = subject_by_id[req["subject_id"]]
+
+        if subject["required_room_id"] is not None:
+            resource = ("specific", subject["required_room_id"])
+        elif subject.get("required_room_type") is not None:
+            resource = ("type", subject["required_room_type"])
+        else:
+            continue
+        room_resource_groups.setdefault(resource, []).append(ta["id"])
+
+    for resource, assignment_ids in room_resource_groups.items():
+        if resource[0] == "specific":
+            max_simultaneous = 1
+        else:
+            max_simultaneous = room_count_by_type.get(resource[1], 0)
+
+        for ts in timeslots:
+            model.Add(
+                sum(schedule_vars[(a_id, ts["id"])] for a_id in assignment_ids)
+                <= max_simultaneous
+            )
+
+    # 5. sync_block_identity: synced lessons must share identical timeslots.
+    sync_blocks = {}
+    for ta in teacher_assignments:
+        req = requirement_by_id[ta["cur_requirement_id"]]
+        sbi = req.get("sync_block_identity")
+        if sbi is not None:
+            sync_blocks.setdefault(sbi, []).append(ta["id"])
+
+    for sbi, assignment_ids in sync_blocks.items():
+        if len(assignment_ids) < 2:
+            continue
+        first_id = assignment_ids[0]
+        for other_id in assignment_ids[1:]:
+            for ts in timeslots:
+                model.Add(
+                    schedule_vars[(first_id, ts["id"])]
+                    == schedule_vars[(other_id, ts["id"])]
+                )
 
 
 def _compute_penalty_score(solver, schedule_vars, data, lookups, timeslots):
     """
-    Computes the SAME unified penalty score that GA and Hill Climbing will
-    use, based on the solved CP-SAT model's chosen values. Lower score is
-    better (0 = perfect schedule, no soft violations).
-
-    This does NOT affect what the CSP solver is allowed to choose - it's
-    purely informational, calculated AFTER solving, so it can be compared
-    against GA/Hill Climbing's score later.
+    Computes the unified penalty score based on the solved CP-SAT model.
+    Covers: teacher_constraints (hard/soft), teacher_preferences (full),
+    and subject distribution. Room-awareness and sync_block are enforced
+    structurally above, so they always read 0 here.
     """
     constraint_by_teacher_timeslot = lookups["constraint_by_teacher_timeslot"]
     preferences_by_teacher = lookups["preferences_by_teacher"]
     assignment_by_id = lookups["assignment_by_id"]
     assignments_by_teacher = lookups["assignments_by_teacher"]
+    requirement_by_id = lookups["requirement_by_id"]
 
     total_penalty = 0.0
 
-    # ---- Soft/hard teacher_constraints penalties ----
-    # (In v1, CSP structurally can't violate hard constraints in most cases
-    # because of how the model is built above for conflicts - but
-    # teacher_constraints rows represent availability, which ISN'T yet
-    # wired in as a structural rule. So we score it here, same as GA/HC will.)
+    # ---- teacher_constraints (hard/soft) ----
     for ta in data["teacher_assignments"]:
         for ts in timeslots:
             var = schedule_vars[(ta["id"], ts["id"])]
@@ -199,16 +237,15 @@ def _compute_penalty_score(solver, schedule_vars, data, lookups, timeslots):
                 if constraint is not None:
                     if constraint["constraint_type"] == "hard":
                         total_penalty += HARD_CONSTRAINT_PENALTY
-                    else:  # soft
+                    else:
                         total_penalty += constraint["weight"] * SOFT_CONSTRAINT_WEIGHT_MULTIPLIER
 
-    # ---- teacher_preferences penalties ----
+    # ---- teacher_preferences (full implementation) ----
     for teacher_id, assignment_ids in assignments_by_teacher.items():
         prefs = preferences_by_teacher.get(teacher_id)
         if prefs is None:
-            continue  # no preferences row for this teacher -> nothing to score
+            continue
 
-        # Collect which timeslots this teacher actually teaches at.
         taught_timeslot_ids = []
         for a_id in assignment_ids:
             for ts in timeslots:
@@ -217,24 +254,60 @@ def _compute_penalty_score(solver, schedule_vars, data, lookups, timeslots):
 
         total_hours = len(taught_timeslot_ids)
 
-        # Outside [min_hours, max_hours] range.
+        # Hours range
         if prefs["min_hours"] is not None and total_hours < prefs["min_hours"]:
             total_penalty += (prefs["min_hours"] - total_hours) * OUTSIDE_HOURS_RANGE_PENALTY_PER_HOUR
         if prefs["max_hours"] is not None and total_hours > prefs["max_hours"]:
             total_penalty += (total_hours - prefs["max_hours"]) * OUTSIDE_HOURS_RANGE_PENALTY_PER_HOUR
 
-        # NOTE: no_gaps / free_day / consecutive / early_finish all require
-        # knowing the day_of_week + hour_of_day layout per teacher across
-        # the whole week. Implementing the actual day-by-day gap/consecutive
-        # detection is left as a clearly marked next step, since it depends
-        # on how you want "a gap" defined exactly (e.g. does a free period
-        # before lunch count?). Structure below shows where it plugs in:
+        # Collect (day, hour) pairs for this teacher
+        teacher_day_hours = {}
+        for t_id in taught_timeslot_ids:
+            for ts in timeslots:
+                if ts["id"] == t_id:
+                    teacher_day_hours.setdefault(ts["day_of_week"], []).append(ts["hour_of_day"])
+                    break
 
-        # TODO: implement real gap/free-day/consecutive/early-finish checks
-        # using PREFERENCE_WEIGHTS["no_gaps"], PREFERENCE_WEIGHTS["free_day"],
-        # PREFERENCE_WEIGHTS["consecutive"], PREFERENCE_WEIGHTS["early_finish"]
-        # multiplied by prefs["priority_no_gaps"], prefs["priority_free_day"],
-        # prefs["priority_consecutive"], prefs["priority_early_finish"].
+        teaching_days = len(teacher_day_hours)
+
+        # Free day
+        free_days = 6 - teaching_days
+        if free_days == 0 and prefs.get("priority_free_day") and prefs["priority_free_day"] > 0:
+            total_penalty += PREFERENCE_WEIGHTS["free_day"] * prefs["priority_free_day"]
+
+        # Per-day: gaps, early finish, consecutive
+        for day, hours in teacher_day_hours.items():
+            hours_sorted = sorted(hours)
+            first_hour = hours_sorted[0]
+            last_hour = hours_sorted[-1]
+            expected_if_no_gaps = last_hour - first_hour + 1
+            actual_count = len(hours_sorted)
+            gaps = expected_if_no_gaps - actual_count
+
+            if gaps > 0 and prefs.get("priority_no_gaps") and prefs["priority_no_gaps"] > 0:
+                total_penalty += gaps * PREFERENCE_WEIGHTS["no_gaps"] * prefs["priority_no_gaps"]
+
+            if last_hour > 6 and prefs.get("priority_early_finish") and prefs["priority_early_finish"] > 0:
+                total_penalty += (last_hour - 6) * PREFERENCE_WEIGHTS["early_finish"] * prefs["priority_early_finish"]
+
+            if gaps > 0 and prefs.get("priority_consecutive") and prefs["priority_consecutive"] > 0:
+                total_penalty += gaps * PREFERENCE_WEIGHTS["consecutive"] * prefs["priority_consecutive"]
+
+    # ---- Subject distribution across the week ----
+    subject_by_id = {s["id"]: s for s in data["subjects"]}
+    group_subject_day_counts = {}
+    for ta in data["teacher_assignments"]:
+        req = requirement_by_id[ta["cur_requirement_id"]]
+        group_id = req["student_group_id"]
+        subject_id = req["subject_id"]
+        for ts in timeslots:
+            if solver.Value(schedule_vars[(ta["id"], ts["id"])]) == 1:
+                key = (group_id, subject_id, ts["day_of_week"])
+                group_subject_day_counts[key] = group_subject_day_counts.get(key, 0) + 1
+
+    for key, count in group_subject_day_counts.items():
+        if count > 1:
+            total_penalty += (count - 1) * SUBJECT_DISTRIBUTION_PENALTY_PER_EXTRA_HOUR
 
     return total_penalty
 

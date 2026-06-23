@@ -63,6 +63,8 @@ from scoring_config import (
     HARD_CONSTRAINT_PENALTY,
     SOFT_CONSTRAINT_WEIGHT_MULTIPLIER,
     OUTSIDE_HOURS_RANGE_PENALTY_PER_HOUR,
+    SUBJECT_DISTRIBUTION_PENALTY_PER_EXTRA_HOUR,
+    PREFERENCE_WEIGHTS,
     ALGO_HILL_CLIMBING,
 )
 
@@ -86,6 +88,10 @@ def _build_lookup_maps(data: dict):
     teacher_assignments = data["teacher_assignments"]
     teacher_constraints = data["teacher_constraints"]
     teacher_preferences = data["teacher_preferences"]
+    timeslots = data["timeslots"]
+    subjects = data["subjects"]
+    student_groups = data["student_groups"]
+    rooms = data["rooms"]
 
     requirement_by_id = {req["id"]: req for req in curriculum_requirements}
     assignment_by_id = {ta["id"]: ta for ta in teacher_assignments}
@@ -105,6 +111,16 @@ def _build_lookup_maps(data: dict):
 
     preferences_by_teacher = {p["teacher_id"]: p for p in teacher_preferences}
 
+    timeslot_by_id = {ts["id"]: ts for ts in timeslots}
+    subject_by_id = {s["id"]: s for s in subjects}
+    group_by_id = {g["id"]: g for g in student_groups}
+
+    room_count_by_type = {}
+    for room in rooms:
+        rt = room.get("room_type")
+        if rt is not None:
+            room_count_by_type[rt] = room_count_by_type.get(rt, 0) + 1
+
     return {
         "requirement_by_id": requirement_by_id,
         "assignment_by_id": assignment_by_id,
@@ -112,8 +128,11 @@ def _build_lookup_maps(data: dict):
         "assignments_by_group": assignments_by_group,
         "constraint_by_teacher_timeslot": constraint_by_teacher_timeslot,
         "preferences_by_teacher": preferences_by_teacher,
+        "timeslot_by_id": timeslot_by_id,
+        "subject_by_id": subject_by_id,
+        "group_by_id": group_by_id,
+        "room_count_by_type": room_count_by_type,
     }
-
 
 # ---------------------------------------------------------------------------
 # Initial schedule generation (conflict-aware random)
@@ -187,11 +206,13 @@ def _generate_initial_schedule(data, lookups, timeslot_ids):
 def _score_schedule(schedule, data, lookups):
     """
     Computes the FULL unified penalty score for a candidate schedule.
-    Lower is better, 0 = perfect.
-
-    Unlike CSP, this function ALSO scores the structural rules (teacher
-    double-booking, group double-booking, weekly_hours correctness),
-    since nothing here enforces them structurally.
+    Lower is better, 0 = perfect. Covers:
+      - Structural: teacher/group double-booking, weekly_hours correctness
+      - Room-awareness: simultaneous lessons exceeding available rooms
+      - sync_block_identity: synced lessons must share identical timeslots
+      - Data-driven: teacher_constraints (hard/soft)
+      - Preferences: hours range, gaps, free day, early finish, consecutive
+      - Subject distribution: same subject same day same group penalty
     """
     total_penalty = 0.0
 
@@ -199,10 +220,11 @@ def _score_schedule(schedule, data, lookups):
     requirement_by_id = lookups["requirement_by_id"]
     constraint_by_teacher_timeslot = lookups["constraint_by_teacher_timeslot"]
     preferences_by_teacher = lookups["preferences_by_teacher"]
+    timeslot_by_id = lookups["timeslot_by_id"]
+    subject_by_id = lookups["subject_by_id"]
+    room_count_by_type = lookups["room_count_by_type"]
 
     # ---- Structural: teacher double-booking ----
-    # For each teacher, count how many times each timeslot appears across
-    # ALL of their assignments combined - more than once = a conflict.
     timeslot_count_by_teacher = {}
     for ta in teacher_assignments:
         teacher_id = ta["teacher_id"]
@@ -230,17 +252,58 @@ def _score_schedule(schedule, data, lookups):
                 total_penalty += (count - 1) * HARD_CONSTRAINT_PENALTY
 
     # ---- Structural: weekly_hours correctness ----
-    # (In this implementation each assignment's list length is fixed at
-    # creation time and never changes, so this should always be exactly
-    # right by construction - but we score it anyway for safety/transparency,
-    # the same way the structural checks are scored even though they should
-    # always read 0, mirroring CSP's documented approach.)
     for ta in teacher_assignments:
         req = requirement_by_id[ta["cur_requirement_id"]]
         expected_hours = req["weekly_hours"]
         actual_hours = len(schedule[ta["id"]])
         if actual_hours != expected_hours:
             total_penalty += abs(expected_hours - actual_hours) * HARD_CONSTRAINT_PENALTY
+
+    # ---- Room-awareness: simultaneous room-constrained lessons ----
+    timeslot_room_demand = {}
+    for ta in teacher_assignments:
+        req = requirement_by_id[ta["cur_requirement_id"]]
+        subject = subject_by_id[req["subject_id"]]
+
+        if subject["required_room_id"] is not None:
+            resource = ("specific", subject["required_room_id"])
+        elif subject.get("required_room_type") is not None:
+            resource = ("type", subject["required_room_type"])
+        else:
+            continue
+
+        for t in schedule[ta["id"]]:
+            demands = timeslot_room_demand.setdefault(t, {})
+            demands[resource] = demands.get(resource, 0) + 1
+
+    for t, demands in timeslot_room_demand.items():
+        for resource, count in demands.items():
+            if resource[0] == "specific":
+                max_capacity = 1
+            else:
+                max_capacity = room_count_by_type.get(resource[1], 0)
+            if count > max_capacity:
+                total_penalty += (count - max_capacity) * HARD_CONSTRAINT_PENALTY
+
+    # ---- Structural: sync_block_identity (synced lessons same timeslots) ----
+    sync_blocks = {}
+    for ta in teacher_assignments:
+        req = requirement_by_id[ta["cur_requirement_id"]]
+        sbi = req.get("sync_block_identity")
+        if sbi is not None:
+            sync_blocks.setdefault(sbi, []).append(ta["id"])
+
+    for sbi, assignment_ids in sync_blocks.items():
+        if len(assignment_ids) < 2:
+            continue
+        reference_slots = sorted(schedule[assignment_ids[0]])
+        for a_id in assignment_ids[1:]:
+            other_slots = sorted(schedule[a_id])
+            if reference_slots != other_slots:
+                ref_set = set(reference_slots)
+                other_set = set(other_slots)
+                diff_count = len(ref_set.symmetric_difference(other_set))
+                total_penalty += diff_count * HARD_CONSTRAINT_PENALTY
 
     # ---- Data-driven: teacher_constraints (hard/soft) ----
     for ta in teacher_assignments:
@@ -253,7 +316,7 @@ def _score_schedule(schedule, data, lookups):
                 else:
                     total_penalty += constraint["weight"] * SOFT_CONSTRAINT_WEIGHT_MULTIPLIER
 
-    # ---- Data-driven: teacher_preferences (hours range only, for now) ----
+    # ---- Data-driven: teacher_preferences (full implementation) ----
     assignments_by_teacher = lookups["assignments_by_teacher"]
     for teacher_id, assignment_ids in assignments_by_teacher.items():
         prefs = preferences_by_teacher.get(teacher_id)
@@ -262,13 +325,61 @@ def _score_schedule(schedule, data, lookups):
 
         total_hours = sum(len(schedule[a_id]) for a_id in assignment_ids)
 
+        # Hours range
         if prefs["min_hours"] is not None and total_hours < prefs["min_hours"]:
             total_penalty += (prefs["min_hours"] - total_hours) * OUTSIDE_HOURS_RANGE_PENALTY_PER_HOUR
         if prefs["max_hours"] is not None and total_hours > prefs["max_hours"]:
             total_penalty += (total_hours - prefs["max_hours"]) * OUTSIDE_HOURS_RANGE_PENALTY_PER_HOUR
 
-        # TODO: same as CSP - gap/free-day/consecutive/early-finish checks
-        # not yet implemented.
+        # Collect (day, hour) pairs for this teacher
+        teacher_day_hours = {}
+        for a_id in assignment_ids:
+            for t in schedule[a_id]:
+                ts = timeslot_by_id[t]
+                teacher_day_hours.setdefault(ts["day_of_week"], []).append(ts["hour_of_day"])
+
+        teaching_days = len(teacher_day_hours)
+
+        # Free day preference (penalize if teacher has zero free days)
+        free_days = 6 - teaching_days
+        if free_days == 0 and prefs.get("priority_free_day") and prefs["priority_free_day"] > 0:
+            total_penalty += PREFERENCE_WEIGHTS["free_day"] * prefs["priority_free_day"]
+
+        # Per-day preferences: gaps, early finish, consecutive
+        for day, hours in teacher_day_hours.items():
+            hours_sorted = sorted(hours)
+            first_hour = hours_sorted[0]
+            last_hour = hours_sorted[-1]
+            expected_if_no_gaps = last_hour - first_hour + 1
+            actual_count = len(hours_sorted)
+            gaps = expected_if_no_gaps - actual_count
+
+            # No gaps
+            if gaps > 0 and prefs.get("priority_no_gaps") and prefs["priority_no_gaps"] > 0:
+                total_penalty += gaps * PREFERENCE_WEIGHTS["no_gaps"] * prefs["priority_no_gaps"]
+
+            # Early finish (penalize teaching past hour 6)
+            if last_hour > 6 and prefs.get("priority_early_finish") and prefs["priority_early_finish"] > 0:
+                total_penalty += (last_hour - 6) * PREFERENCE_WEIGHTS["early_finish"] * prefs["priority_early_finish"]
+
+            # Consecutive (also penalizes gaps, from a different preference angle)
+            if gaps > 0 and prefs.get("priority_consecutive") and prefs["priority_consecutive"] > 0:
+                total_penalty += gaps * PREFERENCE_WEIGHTS["consecutive"] * prefs["priority_consecutive"]
+
+    # ---- Subject distribution across the week ----
+    group_subject_day_counts = {}
+    for ta in teacher_assignments:
+        req = requirement_by_id[ta["cur_requirement_id"]]
+        group_id = req["student_group_id"]
+        subject_id = req["subject_id"]
+        for t in schedule[ta["id"]]:
+            ts = timeslot_by_id[t]
+            key = (group_id, subject_id, ts["day_of_week"])
+            group_subject_day_counts[key] = group_subject_day_counts.get(key, 0) + 1
+
+    for key, count in group_subject_day_counts.items():
+        if count > 1:
+            total_penalty += (count - 1) * SUBJECT_DISTRIBUTION_PENALTY_PER_EXTRA_HOUR
 
     return total_penalty
 
