@@ -147,28 +147,54 @@ def _build_lookup_maps(data: dict):
 
 def _generate_random_individual(data, lookups, timeslot_ids):
     """
-    Builds ONE candidate schedule, trying to avoid the most obvious
-    conflicts (teacher/group double-booking) when a non-conflicting slot
-    is conveniently available - same approach as Hill Climbing's initial
-    schedule generation, reused here to build each population member.
-
-    Returns a schedule dict: {assignment_id: [timeslot_id, ...]}
+    Builds ONE candidate schedule, trying to avoid obvious conflicts
+    (teacher/group double-booking, room-resource limits) and aligning
+    sync_block members to identical timeslots.
     """
     teacher_assignments = data["teacher_assignments"]
     requirement_by_id = lookups["requirement_by_id"]
+    subject_by_id = lookups["subject_by_id"]
+    room_count_by_type = lookups["room_count_by_type"]
 
     schedule = {}
     used_timeslots_by_teacher = {}
     used_timeslots_by_group = {}
+    room_usage_by_timeslot = {}
+
+    sync_blocks = {}
+    for ta in teacher_assignments:
+        req = requirement_by_id[ta["cur_requirement_id"]]
+        sbi = req.get("sync_block_identity")
+        if sbi is not None:
+            sync_blocks.setdefault(sbi, []).append(ta["id"])
+
+    sync_followers = set()
+    for sbi, a_ids in sync_blocks.items():
+        for a_id in a_ids[1:]:
+            sync_followers.add(a_id)
 
     shuffled_assignments = teacher_assignments[:]
     random.shuffle(shuffled_assignments)
 
     for ta in shuffled_assignments:
+        if ta["id"] in sync_followers:
+            continue
+
         req = requirement_by_id[ta["cur_requirement_id"]]
         weekly_hours = req["weekly_hours"]
         teacher_id = ta["teacher_id"]
         group_id = req["student_group_id"]
+        subject = subject_by_id[req["subject_id"]]
+
+        if subject["required_room_id"] is not None:
+            resource_key = ("specific", subject["required_room_id"])
+            resource_limit = 1
+        elif subject.get("required_room_type") is not None:
+            resource_key = ("type", subject["required_room_type"])
+            resource_limit = room_count_by_type.get(subject["required_room_type"], 0)
+        else:
+            resource_key = None
+            resource_limit = None
 
         teacher_used = used_timeslots_by_teacher.setdefault(teacher_id, set())
         group_used = used_timeslots_by_group.setdefault(group_id, set())
@@ -176,19 +202,33 @@ def _generate_random_individual(data, lookups, timeslot_ids):
         chosen_timeslots = []
         for _ in range(weekly_hours):
             candidate = None
-            for _attempt in range(10):
+            for _attempt in range(20):
                 t = random.choice(timeslot_ids)
-                if t not in teacher_used and t not in group_used:
-                    candidate = t
-                    break
+                if t in teacher_used or t in group_used:
+                    continue
+                if resource_key is not None:
+                    current_usage = room_usage_by_timeslot.get(t, {}).get(resource_key, 0)
+                    if current_usage >= resource_limit:
+                        continue
+                candidate = t
+                break
             if candidate is None:
                 candidate = random.choice(timeslot_ids)
 
             chosen_timeslots.append(candidate)
             teacher_used.add(candidate)
             group_used.add(candidate)
+            if resource_key is not None:
+                usage = room_usage_by_timeslot.setdefault(candidate, {})
+                usage[resource_key] = usage.get(resource_key, 0) + 1
 
         schedule[ta["id"]] = chosen_timeslots
+
+    for sbi, a_ids in sync_blocks.items():
+        if a_ids[0] in schedule:
+            leader_slots = schedule[a_ids[0]]
+            for follower_id in a_ids[1:]:
+                schedule[follower_id] = list(leader_slots)
 
     return schedule
 
@@ -408,18 +448,31 @@ def _tournament_select(population_with_scores):
 # Crossover: per-assignment inheritance
 # ---------------------------------------------------------------------------
 
-def _crossover(parent_a, parent_b):
+def _crossover(parent_a, parent_b, sync_groups=None):
     """
-    Builds one child schedule: for each assignment_id, the child inherits
-    that assignment's ENTIRE timeslot list from either parent_a or
-    parent_b (random choice per assignment, independent each time).
+    Builds one child schedule. For sync_block members, all assignments in
+    the same block are inherited from the SAME parent (preserving alignment).
     """
     child = {}
+    assigned_from = {}
+
+    # First pass: decide parent per sync group (whole group from one parent).
+    if sync_groups:
+        for sbi, a_ids in sync_groups.items():
+            chosen_parent = parent_a if random.random() < 0.5 else parent_b
+            for a_id in a_ids:
+                child[a_id] = list(chosen_parent[a_id])
+                assigned_from[a_id] = True
+
+    # Second pass: non-synced assignments, random per-assignment as before.
     for assignment_id in parent_a:
+        if assignment_id in assigned_from:
+            continue
         if random.random() < 0.5:
             child[assignment_id] = list(parent_a[assignment_id])
         else:
             child[assignment_id] = list(parent_b[assignment_id])
+
     return child
 
 
@@ -427,17 +480,24 @@ def _crossover(parent_a, parent_b):
 # Mutation: identical idea to Hill Climbing's single-session move
 # ---------------------------------------------------------------------------
 
-def _mutate(schedule, timeslot_ids):
+def _mutate(schedule, timeslot_ids, sync_groups=None):
     """
-    Mutates ONE schedule IN PLACE: picks one random assignment and one of
-    its weekly-hour slots, and moves it to a different random timeslot.
-    Conceptually identical to hill_climbing.solver._get_random_neighbor,
-    but applied directly to a single individual as part of GA's mutation
-    step, rather than used to generate/compare candidate neighbors.
+    Mutates ONE schedule IN PLACE. If the mutated assignment belongs to a
+    sync_block, all members of that block are moved to the same new
+    timeslot (keeping them aligned).
     """
     assignment_id = random.choice(list(schedule.keys()))
     hour_index = random.randrange(len(schedule[assignment_id]))
-    schedule[assignment_id][hour_index] = random.choice(timeslot_ids)
+    new_timeslot = random.choice(timeslot_ids)
+    schedule[assignment_id][hour_index] = new_timeslot
+
+    if sync_groups:
+        for sbi, a_ids in sync_groups.items():
+            if assignment_id in a_ids:
+                for partner_id in a_ids:
+                    if partner_id != assignment_id and hour_index < len(schedule[partner_id]):
+                        schedule[partner_id][hour_index] = new_timeslot
+                break
 
 
 # ---------------------------------------------------------------------------
@@ -569,6 +629,14 @@ def run_genetic(data: dict) -> dict:
     lookups = _build_lookup_maps(data)
     timeslot_ids = [ts["id"] for ts in timeslots]
 
+    # Pre-compute sync groups for sync-aware crossover and mutation.
+    sync_groups = {}
+    for ta in teacher_assignments:
+        req = lookups["requirement_by_id"][ta["cur_requirement_id"]]
+        sbi = req.get("sync_block_identity")
+        if sbi is not None:
+            sync_groups.setdefault(sbi, []).append(ta["id"])
+
     deadline = time.perf_counter() + GA_TIME_BUDGET_SECONDS
 
     population = _generate_initial_population(data, lookups, timeslot_ids, POPULATION_SIZE)
@@ -609,10 +677,10 @@ def run_genetic(data: dict) -> dict:
             parent_a = _tournament_select(population_with_scores)
             parent_b = _tournament_select(population_with_scores)
 
-            child = _crossover(parent_a, parent_b)
+            child = _crossover(parent_a, parent_b, sync_groups=sync_groups)
 
             if random.random() < MUTATION_RATE:
-                _mutate(child, timeslot_ids)
+                _mutate(child, timeslot_ids, sync_groups=sync_groups)
 
             next_population.append(child)
 

@@ -141,59 +141,91 @@ def _build_lookup_maps(data: dict):
 def _generate_initial_schedule(data, lookups, timeslot_ids):
     """
     Builds a starting schedule, trying to avoid the most obvious conflicts
-    (teacher double-booking, group double-booking) WHEN a non-conflicting
-    slot is conveniently available - but does not guarantee a perfectly
-    legal schedule. This gives Hill Climbing a reasonable starting point
-    without the cost of building a fully correct solver from scratch
-    (that's what CSP is for).
-
-    Returns a schedule dict: {assignment_id: [timeslot_id, ...]}
+    (teacher double-booking, group double-booking, room-resource limits)
+    and aligning sync_block members to identical timeslots.
     """
     teacher_assignments = data["teacher_assignments"]
     requirement_by_id = lookups["requirement_by_id"]
+    subject_by_id = lookups["subject_by_id"]
+    room_count_by_type = lookups["room_count_by_type"]
 
     schedule = {}
 
-    # Track, as we go, which timeslots are already used by each teacher
-    # and each student group - so we can TRY to avoid obvious conflicts.
     used_timeslots_by_teacher = {}
     used_timeslots_by_group = {}
+    room_usage_by_timeslot = {}
 
-    # Process assignments in random order each time, so different calls
-    # (different restarts) explore different starting points.
+    # Pre-compute sync blocks so we can align members afterward.
+    sync_blocks = {}
+    for ta in teacher_assignments:
+        req = requirement_by_id[ta["cur_requirement_id"]]
+        sbi = req.get("sync_block_identity")
+        if sbi is not None:
+            sync_blocks.setdefault(sbi, []).append(ta["id"])
+
+    # Track which assignments are non-first sync members (will be copied later).
+    sync_followers = set()
+    for sbi, a_ids in sync_blocks.items():
+        for a_id in a_ids[1:]:
+            sync_followers.add(a_id)
+
     shuffled_assignments = teacher_assignments[:]
     random.shuffle(shuffled_assignments)
 
     for ta in shuffled_assignments:
+        if ta["id"] in sync_followers:
+            continue
+
         req = requirement_by_id[ta["cur_requirement_id"]]
         weekly_hours = req["weekly_hours"]
         teacher_id = ta["teacher_id"]
         group_id = req["student_group_id"]
+        subject = subject_by_id[req["subject_id"]]
+
+        if subject["required_room_id"] is not None:
+            resource_key = ("specific", subject["required_room_id"])
+            resource_limit = 1
+        elif subject.get("required_room_type") is not None:
+            resource_key = ("type", subject["required_room_type"])
+            resource_limit = room_count_by_type.get(subject["required_room_type"], 0)
+        else:
+            resource_key = None
+            resource_limit = None
 
         teacher_used = used_timeslots_by_teacher.setdefault(teacher_id, set())
         group_used = used_timeslots_by_group.setdefault(group_id, set())
 
         chosen_timeslots = []
         for _ in range(weekly_hours):
-            # Try a handful of random candidates, prefer one that doesn't
-            # conflict with this teacher OR this group yet.
             candidate = None
-            for _attempt in range(10):
+            for _attempt in range(20):
                 t = random.choice(timeslot_ids)
-                if t not in teacher_used and t not in group_used:
-                    candidate = t
-                    break
+                if t in teacher_used or t in group_used:
+                    continue
+                if resource_key is not None:
+                    current_usage = room_usage_by_timeslot.get(t, {}).get(resource_key, 0)
+                    if current_usage >= resource_limit:
+                        continue
+                candidate = t
+                break
             if candidate is None:
-                # Gave up avoiding conflict after 10 tries - just place it
-                # anywhere. Hill Climbing's scoring will catch/penalize
-                # this if it's actually a conflict.
                 candidate = random.choice(timeslot_ids)
 
             chosen_timeslots.append(candidate)
             teacher_used.add(candidate)
             group_used.add(candidate)
+            if resource_key is not None:
+                usage = room_usage_by_timeslot.setdefault(candidate, {})
+                usage[resource_key] = usage.get(resource_key, 0) + 1
 
         schedule[ta["id"]] = chosen_timeslots
+
+    # Align sync block followers to the leader's timeslots.
+    for sbi, a_ids in sync_blocks.items():
+        if a_ids[0] in schedule:
+            leader_slots = schedule[a_ids[0]]
+            for follower_id in a_ids[1:]:
+                schedule[follower_id] = list(leader_slots)
 
     return schedule
 
@@ -386,26 +418,18 @@ def _score_schedule(schedule, data, lookups):
 
 def _find_conflicting_assignment_ids(schedule, data, lookups):
     """
-    Returns the SET of assignment_ids that are currently involved in at
-    least one hard conflict (teacher double-booked OR group double-booked
-    at some shared timeslot). Used to bias neighbor selection toward
-    fixing actual problems, instead of picking moves completely at random.
-
-    This does NOT include soft-constraint or preference violations on
-    purpose - those are comparatively minor (small weights), and chasing
-    them with the same urgency as hard conflicts would dilute the repair
-    focus. Hard conflicts (10,000 each) are overwhelmingly the most
-    valuable thing to fix first.
+    Returns the SET of assignment_ids currently involved in at least one
+    hard conflict: teacher double-booking, group double-booking,
+    room-resource over-capacity, or sync_block misalignment.
     """
     teacher_assignments = data["teacher_assignments"]
     requirement_by_id = lookups["requirement_by_id"]
+    subject_by_id = lookups["subject_by_id"]
+    room_count_by_type = lookups["room_count_by_type"]
 
     conflicting_ids = set()
 
-    # Teacher double-booking: for each teacher, find timeslots used more
-    # than once, then mark EVERY assignment of that teacher that uses that
-    # timeslot as conflicting (we don't know which specific occurrence is
-    # "the problem" - any of them moving could resolve it).
+    # ---- Teacher double-booking ----
     assignments_by_teacher = {}
     for ta in teacher_assignments:
         assignments_by_teacher.setdefault(ta["teacher_id"], []).append(ta)
@@ -415,12 +439,11 @@ def _find_conflicting_assignment_ids(schedule, data, lookups):
         for ta in t_assignments:
             for t in schedule[ta["id"]]:
                 timeslot_to_assignment_ids.setdefault(t, []).append(ta["id"])
+        for t, a_ids in timeslot_to_assignment_ids.items():
+            if len(a_ids) > 1:
+                conflicting_ids.update(a_ids)
 
-        for t, assignment_ids in timeslot_to_assignment_ids.items():
-            if len(assignment_ids) > 1:
-                conflicting_ids.update(assignment_ids)
-
-    # Student group double-booking: same idea, grouped by student_group_id.
+    # ---- Student group double-booking ----
     assignments_by_group = {}
     for ta in teacher_assignments:
         req = requirement_by_id[ta["cur_requirement_id"]]
@@ -431,10 +454,51 @@ def _find_conflicting_assignment_ids(schedule, data, lookups):
         for ta in g_assignments:
             for t in schedule[ta["id"]]:
                 timeslot_to_assignment_ids.setdefault(t, []).append(ta["id"])
+        for t, a_ids in timeslot_to_assignment_ids.items():
+            if len(a_ids) > 1:
+                conflicting_ids.update(a_ids)
 
-        for t, assignment_ids in timeslot_to_assignment_ids.items():
-            if len(assignment_ids) > 1:
-                conflicting_ids.update(assignment_ids)
+    # ---- Room-resource over-capacity ----
+    room_resource_at_timeslot = {}
+    for ta in teacher_assignments:
+        req = requirement_by_id[ta["cur_requirement_id"]]
+        subject = subject_by_id[req["subject_id"]]
+
+        if subject["required_room_id"] is not None:
+            resource = ("specific", subject["required_room_id"])
+        elif subject.get("required_room_type") is not None:
+            resource = ("type", subject["required_room_type"])
+        else:
+            continue
+
+        for t in schedule[ta["id"]]:
+            key = (t, resource)
+            room_resource_at_timeslot.setdefault(key, []).append(ta["id"])
+
+    for (t, resource), a_ids in room_resource_at_timeslot.items():
+        if resource[0] == "specific":
+            max_cap = 1
+        else:
+            max_cap = room_count_by_type.get(resource[1], 0)
+        if len(a_ids) > max_cap:
+            conflicting_ids.update(a_ids)
+
+    # ---- sync_block misalignment ----
+    sync_blocks = {}
+    for ta in teacher_assignments:
+        req = requirement_by_id[ta["cur_requirement_id"]]
+        sbi = req.get("sync_block_identity")
+        if sbi is not None:
+            sync_blocks.setdefault(sbi, []).append(ta["id"])
+
+    for sbi, a_ids in sync_blocks.items():
+        if len(a_ids) < 2:
+            continue
+        ref_slots = sorted(schedule[a_ids[0]])
+        for a_id in a_ids[1:]:
+            if sorted(schedule[a_id]) != ref_slots:
+                conflicting_ids.update(a_ids)
+                break
 
     return conflicting_ids
 
@@ -443,17 +507,11 @@ def _find_conflicting_assignment_ids(schedule, data, lookups):
 # Neighbor generation + single climb (one hill, until no improvement found)
 # ---------------------------------------------------------------------------
 
-def _get_random_neighbor(schedule, timeslot_ids, preferred_assignment_ids=None):
+def _get_random_neighbor(schedule, timeslot_ids, preferred_assignment_ids=None, sync_groups=None):
     """
-    Builds ONE neighbor schedule: a copy of `schedule` with exactly one
-    scheduled session moved to a different (random) timeslot.
-
-    If `preferred_assignment_ids` is given and non-empty, the assignment
-    to move is chosen from THAT set instead of from all assignments -
-    this is what lets the climb target known conflicts directly, instead
-    of searching blindly across the whole schedule.
-
-    Returns a brand new schedule dict (does not mutate the input).
+    Builds ONE neighbor schedule with exactly one move. If the moved
+    assignment belongs to a sync_block, all members of that block are
+    moved to the same new timeslot (keeping them aligned).
     """
     if preferred_assignment_ids:
         assignment_id = random.choice(list(preferred_assignment_ids))
@@ -466,44 +524,48 @@ def _get_random_neighbor(schedule, timeslot_ids, preferred_assignment_ids=None):
     new_timeslot = random.choice(timeslot_ids)
     new_schedule[assignment_id][hour_index] = new_timeslot
 
+    # If this assignment is part of a sync block, move all partners too.
+    if sync_groups:
+        for sbi, a_ids in sync_groups.items():
+            if assignment_id in a_ids:
+                for partner_id in a_ids:
+                    if partner_id != assignment_id and hour_index < len(new_schedule[partner_id]):
+                        new_schedule[partner_id][hour_index] = new_timeslot
+                break
+
     return new_schedule
 
 
 def _climb(initial_schedule, data, lookups, timeslot_ids, deadline):
     """
     Runs ONE hill-climb from initial_schedule until no sampled neighbor
-    improves the score (a local optimum), or the overall time deadline
-    is reached.
-
-    Neighbor sampling is conflict-targeted: each step, we first check
-    which assignments are currently involved in a hard conflict
-    (teacher/group double-booking). If any exist, MOST sampled neighbors
-    move one of those specifically (targeted repair), while a smaller
-    portion still sample fully at random (so soft-constraint/preference
-    improvements aren't ignored once hard conflicts are gone, and so we
-    don't get stuck only ever looking at the same few assignments).
-
-    Returns (best_schedule, best_score) found during this climb.
+    improves the score or the time deadline is reached.
     """
     current_schedule = initial_schedule
     current_score = _score_schedule(current_schedule, data, lookups)
+
+    # Pre-compute sync groups for sync-aware neighbor moves.
+    requirement_by_id = lookups["requirement_by_id"]
+    sync_groups = {}
+    for ta in data["teacher_assignments"]:
+        req = requirement_by_id[ta["cur_requirement_id"]]
+        sbi = req.get("sync_block_identity")
+        if sbi is not None:
+            sync_groups.setdefault(sbi, []).append(ta["id"])
 
     while time.perf_counter() < deadline:
         conflicting_ids = _find_conflicting_assignment_ids(current_schedule, data, lookups)
 
         best_neighbor = None
-        best_neighbor_score = current_score  # only accept STRICT improvements
+        best_neighbor_score = current_score
 
         for i in range(NEIGHBORS_SAMPLED_PER_STEP):
-            # 80% of samples target known conflicts (if any exist), the
-            # rest sample fully at random - keeps repair focused without
-            # losing the ability to improve soft constraints once the
-            # schedule is structurally clean.
             use_targeted = conflicting_ids and (i % 5 != 0)
             neighbor = _get_random_neighbor(
                 current_schedule,
                 timeslot_ids,
                 preferred_assignment_ids=conflicting_ids if use_targeted else None,
+                sync_groups=sync_groups,
             )
             neighbor_score = _score_schedule(neighbor, data, lookups)
             if neighbor_score < best_neighbor_score:
@@ -511,15 +573,12 @@ def _climb(initial_schedule, data, lookups, timeslot_ids, deadline):
                 best_neighbor_score = neighbor_score
 
         if best_neighbor is None:
-            # No sampled neighbor improved on the current schedule -
-            # local optimum reached for this climb.
             break
 
         current_schedule = best_neighbor
         current_score = best_neighbor_score
 
         if current_score == 0:
-            # Perfect schedule found - no point climbing further.
             break
 
     return current_schedule, current_score
