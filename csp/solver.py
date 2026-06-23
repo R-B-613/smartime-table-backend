@@ -241,38 +241,74 @@ def _compute_penalty_score(solver, schedule_vars, data, lookups, timeslots):
 
 def _assign_rooms(solver, schedule_vars, data, timeslots):
     """
-    Very simple v1 room assignment: for each (assignment, timeslot) that
-    was scheduled, pick the first room not already used by another lesson
-    at that same timeslot. No capacity or type matching yet (see TODO at
-    top of file).
-
-    Returns a list of dicts shaped for data_access.save_schedule_run():
-        [{"timeslot_id": ..., "tea_assignment_id": ..., "room_id": ...}, ...]
+    Smart room assignment, applied AFTER the CP-SAT solve is complete.
+    Same three-tier priority as HC/GA (specific room -> room type ->
+    home room -> fallback), adapted for CSP's variable-based schedule
+    representation.
+    All tiers check: room is free at this timeslot AND capacity >= group size.
     """
     rooms = data["rooms"]
-    schedule_entries = []
+    subjects = data["subjects"]
+    student_groups = data["student_groups"]
+    curriculum_requirements = data["curriculum_requirements"]
 
-    # Track which rooms are already used at each timeslot.
+    room_by_id = {r["id"]: r for r in rooms}
+    subject_by_id = {s["id"]: s for s in subjects}
+    group_by_id = {g["id"]: g for g in student_groups}
+    requirement_by_id = {req["id"]: req for req in curriculum_requirements}
+
+    schedule_entries = []
     used_rooms_by_timeslot = {ts["id"]: set() for ts in timeslots}
 
     for ta in data["teacher_assignments"]:
+        req = requirement_by_id[ta["cur_requirement_id"]]
+        subject = subject_by_id[req["subject_id"]]
+        group = group_by_id[req["student_group_id"]]
+
         for ts in timeslots:
             var = schedule_vars[(ta["id"], ts["id"])]
             if solver.Value(var) == 1:
                 assigned_room = None
-                for room in rooms:
-                    if room["id"] not in used_rooms_by_timeslot[ts["id"]]:
-                        assigned_room = room["id"]
-                        break
 
-                if assigned_room is None:
-                    # No free room left at this timeslot - in v1 this is a
-                    # known limitation (no capacity-aware room logic yet).
-                    # We still record the entry without a room here so it's
-                    # visible, rather than silently dropping it.
-                    assigned_room = None
+                if subject["required_room_id"] is not None:
+                    # Priority 1: subject needs ONE specific dedicated room.
+                    room_id = subject["required_room_id"]
+                    room = room_by_id.get(room_id)
+                    if (room
+                            and room_id not in used_rooms_by_timeslot[ts["id"]]
+                            and room["capacity"] >= group["student_count"]):
+                        assigned_room = room_id
 
-                used_rooms_by_timeslot[ts["id"]].add(assigned_room)
+                elif subject.get("required_room_type") is not None:
+                    # Priority 2: subject needs any room of a certain type.
+                    for room in rooms:
+                        if (room.get("room_type") == subject["required_room_type"]
+                                and room["id"] not in used_rooms_by_timeslot[ts["id"]]
+                                and room["capacity"] >= group["student_count"]):
+                            assigned_room = room["id"]
+                            break
+
+                else:
+                    # Priority 3: use the group's home (parent) classroom.
+                    home_room_id = group.get("home_room_id")
+                    if home_room_id is not None:
+                        room = room_by_id.get(home_room_id)
+                        if (room
+                                and home_room_id not in used_rooms_by_timeslot[ts["id"]]
+                                and room["capacity"] >= group["student_count"]):
+                            assigned_room = home_room_id
+
+                    # Fallback: any free room with sufficient capacity.
+                    if assigned_room is None:
+                        for room in rooms:
+                            if (room["id"] not in used_rooms_by_timeslot[ts["id"]]
+                                    and room["capacity"] >= group["student_count"]):
+                                assigned_room = room["id"]
+                                break
+
+                if assigned_room is not None:
+                    used_rooms_by_timeslot[ts["id"]].add(assigned_room)
+
                 schedule_entries.append(
                     {
                         "timeslot_id": ts["id"],

@@ -325,20 +325,81 @@ def _mutate(schedule, timeslot_ids):
 # ---------------------------------------------------------------------------
 
 def _assign_rooms(schedule, data, timeslot_ids):
+    """
+    Smart room assignment, applied AFTER the timeslot schedule is finalized.
+    Three-tier priority per scheduled session:
+      1. Subject has a specific required room (required_room_id) -> use it
+      2. Subject needs a room TYPE (required_room_type) -> any free room
+         of that type
+      3. Default -> group's home_room_id, falling back to any free room
+         with sufficient capacity
+    All tiers check: room is free at this timeslot AND capacity >= group size.
+    """
     rooms = data["rooms"]
-    schedule_entries = []
+    subjects = data["subjects"]
+    student_groups = data["student_groups"]
+    teacher_assignments = data["teacher_assignments"]
+    curriculum_requirements = data["curriculum_requirements"]
 
+    room_by_id = {r["id"]: r for r in rooms}
+    subject_by_id = {s["id"]: s for s in subjects}
+    group_by_id = {g["id"]: g for g in student_groups}
+    requirement_by_id = {req["id"]: req for req in curriculum_requirements}
+    assignment_by_id = {ta["id"]: ta for ta in teacher_assignments}
+
+    schedule_entries = []
     used_rooms_by_timeslot = {t: set() for t in timeslot_ids}
 
     for assignment_id, timeslots in schedule.items():
+        ta = assignment_by_id[assignment_id]
+        req = requirement_by_id[ta["cur_requirement_id"]]
+        subject = subject_by_id[req["subject_id"]]
+        group = group_by_id[req["student_group_id"]]
+
         for t in timeslots:
             assigned_room = None
-            for room in rooms:
-                if room["id"] not in used_rooms_by_timeslot[t]:
-                    assigned_room = room["id"]
-                    break
 
-            used_rooms_by_timeslot[t].add(assigned_room)
+            if subject["required_room_id"] is not None:
+                # Priority 1: subject needs ONE specific dedicated room.
+                room_id = subject["required_room_id"]
+                room = room_by_id.get(room_id)
+                if (room
+                        and room_id not in used_rooms_by_timeslot[t]
+                        and room["capacity"] >= group["student_count"]):
+                    assigned_room = room_id
+                # If busy or too small: stays None (a real conflict).
+
+            elif subject.get("required_room_type") is not None:
+                # Priority 2: subject needs any room of a certain type.
+                for room in rooms:
+                    if (room.get("room_type") == subject["required_room_type"]
+                            and room["id"] not in used_rooms_by_timeslot[t]
+                            and room["capacity"] >= group["student_count"]):
+                        assigned_room = room["id"]
+                        break
+                # If all rooms of this type are busy: stays None.
+
+            else:
+                # Priority 3: use the group's home (parent) classroom.
+                home_room_id = group.get("home_room_id")
+                if home_room_id is not None:
+                    room = room_by_id.get(home_room_id)
+                    if (room
+                            and home_room_id not in used_rooms_by_timeslot[t]
+                            and room["capacity"] >= group["student_count"]):
+                        assigned_room = home_room_id
+
+                # Fallback: any free room with sufficient capacity.
+                if assigned_room is None:
+                    for room in rooms:
+                        if (room["id"] not in used_rooms_by_timeslot[t]
+                                and room["capacity"] >= group["student_count"]):
+                            assigned_room = room["id"]
+                            break
+
+            if assigned_room is not None:
+                used_rooms_by_timeslot[t].add(assigned_room)
+
             schedule_entries.append(
                 {
                     "timeslot_id": t,

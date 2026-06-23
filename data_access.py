@@ -94,14 +94,14 @@ def fetch_all_data():
             data["timeslots"] = cursor.fetchall()
 
             cursor.execute("""
-                SELECT id, room_name, capacity
+                SELECT id, room_name, capacity, room_type
                 FROM rooms
                 ORDER BY id;
             """)
             data["rooms"] = cursor.fetchall()
 
             cursor.execute("""
-                SELECT id, subject_name, required_room_id
+                SELECT id, subject_name, required_room_id, required_room_type
                 FROM subjects
                 ORDER BY id;
             """)
