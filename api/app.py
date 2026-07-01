@@ -20,7 +20,7 @@ import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from api.routers import auth, generation, password_reset
+from api.routers import auth, generation, password_reset, schedule
 
 
 app = FastAPI(title="SmarTime API", version="0.1.0")
@@ -56,3 +56,4 @@ def health():
 app.include_router(auth.router)
 app.include_router(generation.router)
 app.include_router(password_reset.router)
+app.include_router(schedule.router)
