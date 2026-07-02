@@ -29,7 +29,7 @@ def get_current_run():
         with conn.cursor(cursor_factory=RealDictCursor) as cursor:
             cursor.execute(
                 """
-                SELECT id, algorithm, score, run_at
+                SELECT id, algorithm, score, run_at, is_published
                 FROM schedule_runs
                 WHERE is_selected = true
                 ORDER BY run_at DESC, id DESC
@@ -41,7 +41,50 @@ def get_current_run():
         conn.close()
 
 
-def get_schedule_entries(run_id: int, teacher_id: int = None):
+def get_published_run():
+    """
+    Returns the latest run marked is_published = true - the one teachers are
+    allowed to see - or None if the admin hasn't published anything yet.
+    """
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+            cursor.execute(
+                """
+                SELECT id, algorithm, score, run_at
+                FROM schedule_runs
+                WHERE is_published = true
+                ORDER BY run_at DESC, id DESC
+                LIMIT 1;
+                """
+            )
+            return cursor.fetchone()
+    finally:
+        conn.close()
+
+
+def publish_run(run_id: int):
+    """
+    Makes one run the published one for teachers: unpublishes every other run
+    first, then publishes this one. So exactly one schedule is ever live.
+    """
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "UPDATE schedule_runs SET is_published = false WHERE is_published = true;"
+            )
+            cursor.execute(
+                "UPDATE schedule_runs SET is_published = true WHERE id = %s;",
+                (run_id,),
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
     """
     All lessons for a run as flat rows:
         {day_of_week, hour_of_day, teacher_id,
