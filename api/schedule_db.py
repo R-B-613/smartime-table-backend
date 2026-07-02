@@ -1,12 +1,6 @@
 """
 api/schedule_db.py
-
-Read-only queries for showing the CURRENT timetable - the most recent run
-that was marked is_selected = true. Reuses the same table JOINs as your
-view_schedule.py, so the data lines up with what you already verified in
-the terminal.
-
-Nothing here writes to the database.
+Read-only queries for the current + published timetable.
 """
 
 from psycopg2.extras import RealDictCursor
@@ -15,15 +9,6 @@ from data_access import get_db_connection
 
 
 def get_current_run():
-    """
-    Returns the latest schedule_runs row with is_selected = true
-    ({id, algorithm, score, run_at}), or None if no schedule has been
-    generated yet.
-
-    "Latest" because is_selected can be true on more than one run over time
-    (each generation marks its own winner); the newest one is the current
-    timetable.
-    """
     conn = get_db_connection()
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cursor:
@@ -42,10 +27,6 @@ def get_current_run():
 
 
 def get_published_run():
-    """
-    Returns the latest run marked is_published = true - the one teachers are
-    allowed to see - or None if the admin hasn't published anything yet.
-    """
     conn = get_db_connection()
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cursor:
@@ -64,20 +45,11 @@ def get_published_run():
 
 
 def publish_run(run_id: int):
-    """
-    Makes one run the published one for teachers: unpublishes every other run
-    first, then publishes this one. So exactly one schedule is ever live.
-    """
     conn = get_db_connection()
     try:
         with conn.cursor() as cursor:
-            cursor.execute(
-                "UPDATE schedule_runs SET is_published = false WHERE is_published = true;"
-            )
-            cursor.execute(
-                "UPDATE schedule_runs SET is_published = true WHERE id = %s;",
-                (run_id,),
-            )
+            cursor.execute("UPDATE schedule_runs SET is_published = false WHERE is_published = true;")
+            cursor.execute("UPDATE schedule_runs SET is_published = true WHERE id = %s;", (run_id,))
         conn.commit()
     except Exception:
         conn.rollback()
@@ -85,15 +57,8 @@ def publish_run(run_id: int):
     finally:
         conn.close()
 
-    """
-    All lessons for a run as flat rows:
-        {day_of_week, hour_of_day, teacher_id,
-         teacher_first_name, teacher_last_name,
-         subject_name, group_name, room_name}
 
-    If teacher_id is given, only that teacher's lessons are returned (used
-    for the teacher's own read-only view).
-    """
+def get_schedule_entries(run_id: int, teacher_id: int = None):
     conn = get_db_connection()
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cursor:
@@ -122,7 +87,6 @@ def publish_run(run_id: int):
                 query += " AND te.id = %s"
                 params.append(teacher_id)
             query += " ORDER BY t.day_of_week, t.hour_of_day;"
-
             cursor.execute(query, params)
             return cursor.fetchall()
     finally:
