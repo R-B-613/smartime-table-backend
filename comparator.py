@@ -62,6 +62,7 @@ def save_and_select_best_result(results: list) -> dict:
             algorithm=result["algorithm"],
             score=result["score"],
             schedule_entries=result["schedule_entries"],
+            violations=result.get("violations"),
         )
         saved_run_ids[result["algorithm"]] = run_id
 

@@ -12,7 +12,7 @@ Credential reading re-uses the same approach as your original main.py
 
 import os
 import psycopg2
-from psycopg2.extras import RealDictCursor
+from psycopg2.extras import RealDictCursor, Json
 
 
 def get_db_credentials(filepath="~/credentials.txt"):
@@ -186,7 +186,7 @@ def mark_run_as_selected(run_id: int):
         conn.close()
 
 
-def save_schedule_run(algorithm: str, score: float, schedule_entries: list):
+def save_schedule_run(algorithm: str, score: float, schedule_entries: list, violations: list = None):
     """
     Inserts a new row into schedule_runs (with the given algorithm name and
     score), then inserts all schedule_entries into the schedule table,
@@ -206,11 +206,11 @@ def save_schedule_run(algorithm: str, score: float, schedule_entries: list):
         with conn.cursor() as cursor:
             cursor.execute(
                 """
-                INSERT INTO schedule_runs (algorithm, score)
-                VALUES (%s, %s)
+                INSERT INTO schedule_runs (algorithm, score, violations)
+                VALUES (%s, %s, %s)
                 RETURNING id;
                 """,
-                (algorithm, score),
+                (algorithm, score, Json(violations) if violations is not None else None),
             )
             run_id = cursor.fetchone()[0]
 

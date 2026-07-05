@@ -43,3 +43,13 @@ def publish_current(admin: dict = Depends(get_current_admin)):
         )
     publish_run(run["id"])
     return {"detail": "published", "run_id": run["id"]}
+
+@router.get("/violations")
+def current_violations(admin: dict = Depends(get_current_admin)):
+    run = get_current_run()
+    if run is None:
+        return {"run": None, "violations": []}
+    return {
+        "run": {"id": run["id"], "algorithm": run["algorithm"], "score": run["score"], "is_published": run["is_published"]},
+        "violations": run.get("violations") or [],
+    }

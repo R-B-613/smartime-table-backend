@@ -14,7 +14,7 @@ def get_current_run():
         with conn.cursor(cursor_factory=RealDictCursor) as cursor:
             cursor.execute(
                 """
-                SELECT id, algorithm, score, run_at, is_published
+                SELECT id, algorithm, score, run_at, is_published, violations
                 FROM schedule_runs
                 WHERE is_selected = true
                 ORDER BY run_at DESC, id DESC

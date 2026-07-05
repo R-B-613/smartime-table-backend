@@ -58,6 +58,7 @@ TODO (explicitly deferred for v1, same as CSP and Hill Climbing):
 
 import random
 import time
+from scoring_violations import score_genetic_schedule_with_violations
 
 from scoring_config import (
     HARD_CONSTRAINT_PENALTY,
@@ -688,10 +689,15 @@ def run_genetic(data: dict) -> dict:
         population = next_population
 
     schedule_entries = _assign_rooms(best_schedule, data, timeslot_ids)
+    
+    _vtotal, violations = score_genetic_schedule_with_violations(best_schedule, data, lookups)
+    if abs(_vtotal - best_score) > 0.5:
+        print(f"[warn] violations total {_vtotal} != best_score {best_score}")
 
     return {
         "algorithm": ALGO_GENETIC,
         "status": "COMPLETED",
         "score": best_score,
         "schedule_entries": schedule_entries,
+        "violations": violations,
     }
