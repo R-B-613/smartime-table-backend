@@ -61,6 +61,7 @@ import time
 
 from scoring_config import (
     HARD_CONSTRAINT_PENALTY,
+    TEACHER_HARD_CONSTRAINT_PENALTY,
     SOFT_CONSTRAINT_WEIGHT_MULTIPLIER,
     OUTSIDE_HOURS_RANGE_PENALTY_PER_HOUR,
     SUBJECT_DISTRIBUTION_PENALTY_PER_EXTRA_HOUR,
@@ -355,7 +356,7 @@ def _score_schedule(schedule, data, lookups):
             constraint = constraint_by_teacher_timeslot.get((teacher_id, t))
             if constraint is not None:
                 if constraint["constraint_type"] == "hard":
-                    total_penalty += HARD_CONSTRAINT_PENALTY
+                    total_penalty += TEACHER_HARD_CONSTRAINT_PENALTY
                 else:
                     total_penalty += constraint["weight"] * SOFT_CONSTRAINT_WEIGHT_MULTIPLIER
 

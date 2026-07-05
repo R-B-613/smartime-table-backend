@@ -49,6 +49,7 @@ TODO (explicitly skipped for v1, per project decision):
 from ortools.sat.python import cp_model
 from scoring_config import (
     HARD_CONSTRAINT_PENALTY,
+    TEACHER_HARD_CONSTRAINT_PENALTY,
     SOFT_CONSTRAINT_WEIGHT_MULTIPLIER,
     PREFERENCE_WEIGHTS,
     OUTSIDE_HOURS_RANGE_PENALTY_PER_HOUR,
@@ -236,7 +237,7 @@ def _compute_penalty_score(solver, schedule_vars, data, lookups, timeslots):
                 constraint = constraint_by_teacher_timeslot.get(key)
                 if constraint is not None:
                     if constraint["constraint_type"] == "hard":
-                        total_penalty += HARD_CONSTRAINT_PENALTY
+                        total_penalty += TEACHER_HARD_CONSTRAINT_PENALTY
                     else:
                         total_penalty += constraint["weight"] * SOFT_CONSTRAINT_WEIGHT_MULTIPLIER
 

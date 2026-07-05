@@ -25,6 +25,10 @@ Design idea (as discussed):
 # hard constraint.
 HARD_CONSTRAINT_PENALTY = 10_000
 
+# A teacher's "cannot teach" — strong, but below structural 10,000 so the
+# timetable stays solvable even if a teacher's hard block can't be honored.
+TEACHER_HARD_CONSTRAINT_PENALTY = 500
+
 # ---------------------------------------------------------------------------
 # Soft constraints (teacher_constraints where constraint_type = 'soft')
 # ---------------------------------------------------------------------------
