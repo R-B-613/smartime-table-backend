@@ -47,6 +47,7 @@ TODO (explicitly skipped for v1, per project decision):
 """
 
 from ortools.sat.python import cp_model
+from scoring_violations import score_genetic_schedule_with_violations
 from scoring_config import (
     HARD_CONSTRAINT_PENALTY,
     TEACHER_HARD_CONSTRAINT_PENALTY,
@@ -448,9 +449,19 @@ def run_csp(data: dict) -> dict:
     score = _compute_penalty_score(solver, schedule_vars, data, lookups, timeslots)
     schedule_entries = _assign_rooms(solver, schedule_vars, data, timeslots)
 
+    # Convert the solved CP-SAT variables into the same {assignment_id:
+    # [timeslot_id, ...]} format the violations scorer expects, then reuse it.
+    csp_schedule = {ta["id"]: [] for ta in data["teacher_assignments"]}
+    for ta in data["teacher_assignments"]:
+        for ts in timeslots:
+            if solver.Value(schedule_vars[(ta["id"], ts["id"])]) == 1:
+                csp_schedule[ta["id"]].append(ts["id"])
+    _vtotal, violations = score_genetic_schedule_with_violations(csp_schedule, data, lookups)
+
     return {
         "algorithm": ALGO_CSP,
         "status": status_name,
         "score": score,
         "schedule_entries": schedule_entries,
+        "violations": violations,
     }
