@@ -97,6 +97,19 @@ def _build_lookup_maps(data: dict):
     # teacher_id -> preferences row
     preferences_by_teacher = {p["teacher_id"]: p for p in teacher_preferences}
 
+    # Extra lookups needed by the shared violations scorer.
+    subjects = data["subjects"]
+    student_groups = data["student_groups"]
+    rooms = data["rooms"]
+    timeslot_by_id = {ts["id"]: ts for ts in timeslots}
+    subject_by_id = {s["id"]: s for s in subjects}
+    group_by_id = {g["id"]: g for g in student_groups}
+    room_count_by_type = {}
+    for room in rooms:
+        rt = room.get("room_type")
+        if rt is not None:
+            room_count_by_type[rt] = room_count_by_type.get(rt, 0) + 1
+
     return {
         "requirement_by_id": requirement_by_id,
         "assignment_by_id": assignment_by_id,
@@ -104,6 +117,10 @@ def _build_lookup_maps(data: dict):
         "assignments_by_group": assignments_by_group,
         "constraint_by_teacher_timeslot": constraint_by_teacher_timeslot,
         "preferences_by_teacher": preferences_by_teacher,
+        "timeslot_by_id": timeslot_by_id,
+        "subject_by_id": subject_by_id,
+        "group_by_id": group_by_id,
+        "room_count_by_type": room_count_by_type,
     }
 
 
