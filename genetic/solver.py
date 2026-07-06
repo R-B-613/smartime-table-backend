@@ -58,8 +58,7 @@ TODO (explicitly deferred for v1, same as CSP and Hill Climbing):
 
 import random
 import time
-from scoring_violations import score_genetic_schedule_with_violations
-
+from scoring_violations import score_genetic_schedule_with_violations, student_structure_penalties
 from scoring_config import (
     HARD_CONSTRAINT_PENALTY,
     TEACHER_HARD_CONSTRAINT_PENALTY,
@@ -425,6 +424,8 @@ def _score_schedule(schedule, data, lookups):
     for key, count in group_subject_day_counts.items():
         if count > 1:
             total_penalty += (count - 1) * SUBJECT_DISTRIBUTION_PENALTY_PER_EXTRA_HOUR
+
+    total_penalty += student_structure_penalties(schedule, data, lookups)[0]
 
     return total_penalty
 

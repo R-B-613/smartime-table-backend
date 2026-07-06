@@ -26,6 +26,91 @@ from scoring_config import (
 
 DAY_NAMES = {1: "ראשון", 2: "שני", 3: "שלישי", 4: "רביעי", 5: "חמישי", 6: "שישי"}
 
+# Grade letter -> grade number. Young grades = 1-3 (א/ב/ג).
+GRADE_LETTERS = {"א": 1, "ב": 2, "ג": 3, "ד": 4, "ה": 5, "ו": 6}
+
+
+def grade_of(group_name):
+    """Derive grade number from a class name like 'כיתה א1' -> 1. None if unknown."""
+    if not group_name:
+        return None
+    rest = group_name.replace("כיתה", "").strip()
+    return GRADE_LETTERS.get(rest[0]) if rest else None
+
+
+def student_structure_penalties(schedule, data, lookups, collect=False):
+    """
+    Student-focused structural rules, shared by ALL three algorithms so the
+    score they optimise and the violations they report can never drift:
+
+      - No internal gaps: a class's lessons on a day must have no empty period
+        between its first and last lesson.                       (HARD)
+      - Start at period 1: a class must begin its day at period 1. (HARD)
+      - Young grades (1-3) finish early: no lessons in periods 7-8. (SOFT)
+
+    schedule: {assignment_id: [timeslot_id, ...]}
+    Returns (total_penalty, violations_or_None). Pass collect=True to also
+    build the human-readable violations list (used only for the report, not
+    in the hot optimisation loop).
+    """
+    from scoring_config import (
+        STUDENT_GAP_PENALTY,
+        STUDENT_LATE_START_PENALTY,
+        YOUNG_GRADE_LATE_PENALTY,
+    )
+
+    requirement_by_id = lookups["requirement_by_id"]
+    timeslot_by_id = lookups["timeslot_by_id"]
+    group_by_id = lookups["group_by_id"]
+
+    total = 0.0
+    violations = [] if collect else None
+
+    def gname_of(gid):
+        return group_by_id.get(gid, {}).get("group_name", f"קבוצה {gid}")
+
+    # Gather each group's lesson-hours per day.
+    group_day_hours = {}
+    for ta in data["teacher_assignments"]:
+        req = requirement_by_id[ta["cur_requirement_id"]]
+        gid = req["student_group_id"]
+        for t in schedule[ta["id"]]:
+            ts = timeslot_by_id[t]
+            group_day_hours.setdefault((gid, ts["day_of_week"]), []).append(ts["hour_of_day"])
+
+    for (gid, day), hours in group_day_hours.items():
+        hs = sorted(set(hours))
+        if not hs:
+            continue
+        first, last = hs[0], hs[-1]
+
+        # Internal gaps (hard)
+        internal = (last - first + 1) - len(hs)
+        if internal > 0:
+            pen = internal * STUDENT_GAP_PENALTY
+            total += pen
+            if collect:
+                violations.append({"type": "student_gap", "detail": f"{gname_of(gid)}: {internal} חלונות ריקים ביום {DAY_NAMES.get(day, day)}", "penalty": pen, "severity": "hard"})
+
+        # Must start at period 1 (hard)
+        if first > 1:
+            pen = STUDENT_LATE_START_PENALTY
+            total += pen
+            if collect:
+                violations.append({"type": "student_late_start", "detail": f"{gname_of(gid)}: לא מתחיל בשעה 1 ביום {DAY_NAMES.get(day, day)} (מתחיל בשעה {first})", "penalty": pen, "severity": "hard"})
+
+        # Young grades (1-3) finishing in periods 7-8 (soft)
+        grade = grade_of(gname_of(gid))
+        if grade is not None and grade <= 3:
+            late = [h for h in hs if h >= 7]
+            if late:
+                pen = len(late) * YOUNG_GRADE_LATE_PENALTY
+                total += pen
+                if collect:
+                    violations.append({"type": "young_grade_late", "detail": f"{gname_of(gid)} (שכבה {grade}): {len(late)} שיעורים בשעות 7-8 ביום {DAY_NAMES.get(day, day)}", "penalty": pen, "severity": "soft"})
+
+    return total, violations
+
 
 def _day_hour(timeslot_by_id, t):
     ts = timeslot_by_id.get(t)
@@ -239,6 +324,11 @@ def score_genetic_schedule_with_violations(schedule, data, lookups):
             gname = group_by_id.get(group_id, {}).get("group_name", "קבוצה")
             subj = subject_by_id.get(subject_id, {}).get("subject_name", "מקצוע")
             violations.append({"type": "subject_distribution", "detail": f"{gname} / {subj}: {count} שיעורים באותו יום ({DAY_NAMES.get(day, day)})", "penalty": pen, "severity": "soft"})
+
+    # ---- Student structure: gaps, start-at-1 (hard) + young grades late (soft) ----
+    _stot, _svios = student_structure_penalties(schedule, data, lookups, collect=True)
+    total_penalty += _stot
+    violations.extend(_svios)
 
     violations.sort(key=lambda v: v["penalty"], reverse=True)
     return total_penalty, violations

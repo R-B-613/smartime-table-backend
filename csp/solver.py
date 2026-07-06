@@ -47,7 +47,8 @@ TODO (explicitly skipped for v1, per project decision):
 """
 
 from ortools.sat.python import cp_model
-from scoring_violations import score_genetic_schedule_with_violations
+from scoring_violations import score_genetic_schedule_with_violations, grade_of
+
 from scoring_config import (
     HARD_CONSTRAINT_PENALTY,
     TEACHER_HARD_CONSTRAINT_PENALTY,
@@ -57,6 +58,7 @@ from scoring_config import (
     SUBJECT_DISTRIBUTION_PENALTY_PER_EXTRA_HOUR,
     CSP_MAX_SOLVE_SECONDS,
     ALGO_CSP,
+    YOUNG_GRADE_LATE_PENALTY,
 )
 
 
@@ -137,6 +139,27 @@ def _create_decision_variables(model, teacher_assignments, timeslots):
             schedule_vars[(ta["id"], ts["id"])] = model.NewBoolVar(var_name)
     return schedule_vars
 
+def _add_student_contiguity_constraints(model, schedule_vars, data, lookups, timeslots):
+    """
+    HARD structural rule: each group's lessons on a day must form a contiguous
+    block starting at period 1 (no late start, no internal gaps). Since group
+    double-booking is already forbidden, busy(p) is 0/1, so the single rule
+    busy(p) <= busy(p-1) enforces BOTH 'start at 1' AND 'no gaps' at once.
+    """
+    assignments_by_group = lookups["assignments_by_group"]
+    ts_by_day_hour = {}
+    hours_by_day = {}
+    for ts in timeslots:
+        ts_by_day_hour[(ts["day_of_week"], ts["hour_of_day"])] = ts["id"]
+        hours_by_day.setdefault(ts["day_of_week"], []).append(ts["hour_of_day"])
+
+    for group_id, assignment_ids in assignments_by_group.items():
+        for day, hours in hours_by_day.items():
+            hs = sorted(hours)
+            for i in range(1, len(hs)):
+                cur = sum(schedule_vars[(a_id, ts_by_day_hour[(day, hs[i])])] for a_id in assignment_ids)
+                prev = sum(schedule_vars[(a_id, ts_by_day_hour[(day, hs[i - 1])])] for a_id in assignment_ids)
+                model.Add(cur <= prev)
 
 def _add_structural_hard_constraints(model, schedule_vars, data, lookups, timeslots):
     """
@@ -328,6 +351,18 @@ def _compute_penalty_score(solver, schedule_vars, data, lookups, timeslots):
         if count > 1:
             total_penalty += (count - 1) * SUBJECT_DISTRIBUTION_PENALTY_PER_EXTRA_HOUR
 
+    # ---- Young grades (1-3) finishing in periods 7-8 (soft) ----
+    group_by_id = lookups["group_by_id"]
+    timeslot_by_id = lookups["timeslot_by_id"]
+    for ta in data["teacher_assignments"]:
+        req = requirement_by_id[ta["cur_requirement_id"]]
+        grade = grade_of(group_by_id.get(req["student_group_id"], {}).get("group_name", ""))
+        if grade is None or grade > 3:
+            continue
+        for ts in timeslots:
+            if solver.Value(schedule_vars[(ta["id"], ts["id"])]) == 1 and timeslot_by_id[ts["id"]]["hour_of_day"] >= 7:
+                total_penalty += YOUNG_GRADE_LATE_PENALTY
+
     return total_penalty
 
 
@@ -448,6 +483,7 @@ def run_csp(data: dict) -> dict:
     schedule_vars = _create_decision_variables(model, teacher_assignments, timeslots)
 
     _add_structural_hard_constraints(model, schedule_vars, data, lookups, timeslots)
+    _add_student_contiguity_constraints(model, schedule_vars, data, lookups, timeslots)
 
     solver = cp_model.CpSolver()
     solver.parameters.max_time_in_seconds = CSP_MAX_SOLVE_SECONDS

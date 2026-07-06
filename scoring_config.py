@@ -29,6 +29,11 @@ HARD_CONSTRAINT_PENALTY = 10_000
 # timetable stays solvable even if a teacher's hard block can't be honored.
 TEACHER_HARD_CONSTRAINT_PENALTY = 500
 
+# Student structural rules
+STUDENT_GAP_PENALTY = 10_000          # internal empty period in a class's day (hard)
+STUDENT_LATE_START_PENALTY = 10_000   # class not starting at period 1 (hard)
+YOUNG_GRADE_LATE_PENALTY = 500        # grades 1-3 with a lesson in period 7-8 (soft)
+
 # ---------------------------------------------------------------------------
 # Soft constraints (teacher_constraints where constraint_type = 'soft')
 # ---------------------------------------------------------------------------
