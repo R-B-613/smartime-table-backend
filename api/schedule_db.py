@@ -14,7 +14,7 @@ def get_current_run():
         with conn.cursor(cursor_factory=RealDictCursor) as cursor:
             cursor.execute(
                 """
-                SELECT id, algorithm, score, run_at, is_published, violations
+                SELECT id, algorithm, score, run_at, is_published, violations, published_at
                 FROM schedule_runs
                 WHERE is_selected = true
                 ORDER BY run_at DESC, id DESC
@@ -32,7 +32,7 @@ def get_published_run():
         with conn.cursor(cursor_factory=RealDictCursor) as cursor:
             cursor.execute(
                 """
-                SELECT id, algorithm, score, run_at
+                SELECT id, algorithm, score, run_at, published_at
                 FROM schedule_runs
                 WHERE is_published = true
                 ORDER BY run_at DESC, id DESC
@@ -49,7 +49,7 @@ def publish_run(run_id: int):
     try:
         with conn.cursor() as cursor:
             cursor.execute("UPDATE schedule_runs SET is_published = false WHERE is_published = true;")
-            cursor.execute("UPDATE schedule_runs SET is_published = true WHERE id = %s;", (run_id,))
+            cursor.execute("UPDATE schedule_runs SET is_published = true, published_at = NOW() WHERE id = %s;", (run_id,))
         conn.commit()
     except Exception:
         conn.rollback()
