@@ -56,7 +56,9 @@ def student_structure_penalties(schedule, data, lookups, collect=False):
     from scoring_config import (
         STUDENT_GAP_PENALTY,
         STUDENT_LATE_START_PENALTY,
-        YOUNG_GRADE_LATE_PENALTY,
+        GRADE_DISMISSAL,
+        DEFAULT_DISMISSAL,
+        DISMISSAL_PENALTY_PER_HOUR,
     )
 
     requirement_by_id = lookups["requirement_by_id"]
@@ -99,15 +101,16 @@ def student_structure_penalties(schedule, data, lookups, collect=False):
             if collect:
                 violations.append({"type": "student_late_start", "detail": f"{gname_of(gid)}: לא מתחיל בשעה 1 ביום {DAY_NAMES.get(day, day)} (מתחיל בשעה {first})", "penalty": pen, "severity": "hard"})
 
-        # Young grades (1-3) finishing in periods 7-8 (soft)
+        # Per-grade dismissal: lessons past the grade's last allowed period (strong-soft)
         grade = grade_of(gname_of(gid))
-        if grade is not None and grade <= 3:
-            late = [h for h in hs if h >= 7]
+        if grade is not None:
+            dismissal = GRADE_DISMISSAL.get(grade, DEFAULT_DISMISSAL)
+            late = [h for h in hs if h > dismissal]
             if late:
-                pen = len(late) * YOUNG_GRADE_LATE_PENALTY
+                pen = len(late) * DISMISSAL_PENALTY_PER_HOUR
                 total += pen
                 if collect:
-                    violations.append({"type": "young_grade_late", "detail": f"{gname_of(gid)} (שכבה {grade}): {len(late)} שיעורים בשעות 7-8 ביום {DAY_NAMES.get(day, day)}", "penalty": pen, "severity": "soft"})
+                    violations.append({"type": "grade_dismissal", "detail": f"{gname_of(gid)} (שכבה {grade}): {len(late)} שיעורים אחרי שעת הסיום ({dismissal}) ביום {DAY_NAMES.get(day, day)}", "penalty": pen, "severity": "soft"})
 
     return total, violations
 
