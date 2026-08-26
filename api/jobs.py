@@ -134,7 +134,6 @@ def start_generation_job():
     (the caller turns None into an HTTP 409).
     """
     with _LOCK:
-    with _LOCK:
         now = _now()
         # A job is "really" running only if it's marked running AND started
         # recently. A stale running job (crashed thread that never updated its
@@ -152,8 +151,6 @@ def start_generation_job():
                 j["status"] = "failed"
                 j["finished_at"] = now
                 j["error"] = "Job timed out or was interrupted (stale)."
-        if already_running:
-            return None
         job_id = uuid.uuid4().hex
         _JOBS[job_id] = {
             "job_id": job_id,
