@@ -59,6 +59,7 @@ def student_structure_penalties(schedule, data, lookups, collect=False):
         GRADE_DISMISSAL,
         DEFAULT_DISMISSAL,
         DISMISSAL_PENALTY_PER_HOUR,
+        NO_EMPTY_DAY_PENALTY,
     )
 
     requirement_by_id = lookups["requirement_by_id"]
@@ -111,6 +112,19 @@ def student_structure_penalties(schedule, data, lookups, collect=False):
                 total += pen
                 if collect:
                     violations.append({"type": "grade_dismissal", "detail": f"{gname_of(gid)} (שכבה {grade}): {len(late)} שיעורים אחרי שעת הסיום ({dismissal}) ביום {DAY_NAMES.get(day, day)}", "penalty": pen, "severity": "soft"})
+
+    # No empty day: every class must have at least one lesson on each school day (hard)
+    school_days = sorted({ts["day_of_week"] for ts in data["timeslots"]})
+    all_group_ids = {
+        requirement_by_id[ta["cur_requirement_id"]]["student_group_id"]
+        for ta in data["teacher_assignments"]
+    }
+    for gid in all_group_ids:
+        for day in school_days:
+            if (gid, day) not in group_day_hours:
+                total += NO_EMPTY_DAY_PENALTY
+                if collect:
+                    violations.append({"type": "empty_day", "detail": f"{gname_of(gid)}: יום ריק לחלוטין ({DAY_NAMES.get(day, day)})", "penalty": NO_EMPTY_DAY_PENALTY, "severity": "hard"})
 
     return total, violations
 
