@@ -57,6 +57,12 @@ _ALGORITHMS = [
 _JOBS: dict[str, dict] = {}
 _LOCK = threading.Lock()
 
+# A job still "running" past this many seconds is considered dead (its thread
+# crashed or was killed without updating status). After this, a new generation
+# is allowed instead of being blocked forever. The full pipeline is ~3x60s, so
+# 6 minutes leaves generous headroom above a legitimate long run.
+_MAX_JOB_SECONDS = 360
+
 
 def _now() -> dt.datetime:
     return dt.datetime.now(dt.timezone.utc)
@@ -128,7 +134,24 @@ def start_generation_job():
     (the caller turns None into an HTTP 409).
     """
     with _LOCK:
-        already_running = any(j["status"] == "running" for j in _JOBS.values())
+    with _LOCK:
+        now = _now()
+        # A job is "really" running only if it's marked running AND started
+        # recently. A stale running job (crashed thread that never updated its
+        # status) is ignored so generation can't be blocked permanently.
+        really_running = any(
+            j["status"] == "running"
+            and (now - j["started_at"]).total_seconds() < _MAX_JOB_SECONDS
+            for j in _JOBS.values()
+        )
+        if really_running:
+            return None
+        # Mark any stale running jobs as failed, so they stop lingering.
+        for j in _JOBS.values():
+            if j["status"] == "running" and (now - j["started_at"]).total_seconds() >= _MAX_JOB_SECONDS:
+                j["status"] = "failed"
+                j["finished_at"] = now
+                j["error"] = "Job timed out or was interrupted (stale)."
         if already_running:
             return None
         job_id = uuid.uuid4().hex
