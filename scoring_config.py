@@ -74,3 +74,58 @@ CSP_MAX_SOLVE_SECONDS = 60.0
 ALGO_CSP = "CSP"
 ALGO_GENETIC = "GENETIC"
 ALGO_HILL_CLIMBING = "HILL_CLIMBING"
+
+
+# ============================================================
+# STUDENT-STRUCTURE & SCHOOL RULES (added for real-data quality)
+# ============================================================
+
+# Subject categories — drive "holy in the morning" and (later) hard-subject rules.
+# Looked up by subject NAME; anything not listed defaults to "easy" (fails safe:
+# no morning preference, no penalty). Move to a DB column + admin UI later.
+SUBJECT_CATEGORY = {
+    # holy (קודש) — prefer morning hours
+    "תורה": "holy",
+    "נביא": "holy",
+    "הלכה": "holy",
+    "חינוך מתוך אמונה": "holy",
+    "פרשת שבוע": "holy",
+    # hard / core — heavier subjects
+    "חשבון": "hard",
+    "עברית": "hard",
+    "אנגלית": "hard",
+    "מדעים": "hard",
+    # easy — everything else (also the default)
+    "אומנות": "easy",
+    "חינוך גופני": "easy",
+    "כישורי חיים": "easy",
+    "מולדת": "easy",
+    "זה\"ב": "easy",
+}
+
+def category_of(subject_name):
+    """Category for a subject name; defaults to 'easy' if unlisted (fail-safe)."""
+    return SUBJECT_CATEGORY.get(subject_name, "easy")
+
+# Per-grade dismissal: the last teaching period allowed for each grade on a normal day.
+# א,ב,ג finish by period 6; ד,ה,ו by period 8. (Friday is already capped at 4 by timeslots.)
+# Move to a DB table + admin UI later. Grade number from scoring_violations.grade_of().
+GRADE_DISMISSAL = {1: 6, 2: 6, 3: 6, 4: 8, 5: 8, 6: 8}
+DEFAULT_DISMISSAL = 8  # if a grade is somehow unknown
+
+# ---- New penalty weights (fit inside the existing hierarchy) ----
+# HARD: an empty class-day is never acceptable.
+NO_EMPTY_DAY_PENALTY = HARD_CONSTRAINT_PENALTY
+
+# STRONG-SOFT: lessons past a grade's dismissal — strongly avoided, but breakable
+# so tight-hour grades stay feasible. Per hour past dismissal, per class, per day.
+DISMISSAL_PENALTY_PER_HOUR = 60
+
+# SOFT: a holy subject placed in the afternoon (later than a threshold). Per lesson.
+HOLY_MORNING_PENALTY = 15
+HOLY_MORNING_THRESHOLD = 4  # holy lessons after period 4 are penalised
+
+# SOFT: day-to-day imbalance in a class's daily lesson count. Per hour of spread
+# (longest day minus shortest day, beyond a tolerance). 
+BALANCE_PENALTY_PER_HOUR = 8
+BALANCE_TOLERANCE = 2  # a spread of up to 2 hours between days is free
