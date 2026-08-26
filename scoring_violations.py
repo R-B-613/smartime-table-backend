@@ -63,6 +63,8 @@ def student_structure_penalties(schedule, data, lookups, collect=False):
         HOLY_MORNING_PENALTY,
         HOLY_MORNING_THRESHOLD,
         category_of,
+        BALANCE_PENALTY_PER_HOUR,
+        BALANCE_TOLERANCE,
     )
 
     requirement_by_id = lookups["requirement_by_id"]
@@ -143,6 +145,21 @@ def student_structure_penalties(schedule, data, lookups, collect=False):
                 total += HOLY_MORNING_PENALTY
                 if collect:
                     violations.append({"type": "holy_afternoon", "detail": f"{gname_of(gid)} / {subj_name}: לימוד קודש אחרי שעה {HOLY_MORNING_THRESHOLD} ({DAY_NAMES.get(ts['day_of_week'], ts['day_of_week'])} שעה {ts['hour_of_day']})", "penalty": HOLY_MORNING_PENALTY, "severity": "soft"})
+
+    # Balanced daily load: penalise big day-to-day swings in a class's lesson count (soft)
+    group_daily_counts = {}
+    for (gid, day), hours in group_day_hours.items():
+        group_daily_counts.setdefault(gid, []).append(len(set(hours)))
+    for gid, counts in group_daily_counts.items():
+        # only compare across the days the class actually has lessons
+        if len(counts) < 2:
+            continue
+        spread = max(counts) - min(counts)
+        if spread > BALANCE_TOLERANCE:
+            pen = (spread - BALANCE_TOLERANCE) * BALANCE_PENALTY_PER_HOUR
+            total += pen
+            if collect:
+                violations.append({"type": "daily_balance", "detail": f"{gname_of(gid)}: פער של {spread} שעות בין היום הארוך לקצר", "penalty": pen, "severity": "soft"})
 
     return total, violations
 
