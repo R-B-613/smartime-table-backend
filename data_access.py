@@ -174,6 +174,10 @@ def mark_run_as_selected(run_id: int):
     conn = get_db_connection()
     try:
         with conn.cursor() as cursor:
+            # First clear the flag everywhere — there must be exactly ONE
+            # current schedule at a time. Without this, every batch's winner
+            # stays "selected", so multiple runs show as "current".
+            cursor.execute("UPDATE schedule_runs SET is_selected = false WHERE is_selected = true;")
             cursor.execute(
                 "UPDATE schedule_runs SET is_selected = true WHERE id = %s;",
                 (run_id,),
