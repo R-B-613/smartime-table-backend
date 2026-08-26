@@ -60,6 +60,9 @@ def student_structure_penalties(schedule, data, lookups, collect=False):
         DEFAULT_DISMISSAL,
         DISMISSAL_PENALTY_PER_HOUR,
         NO_EMPTY_DAY_PENALTY,
+        HOLY_MORNING_PENALTY,
+        HOLY_MORNING_THRESHOLD,
+        category_of,
     )
 
     requirement_by_id = lookups["requirement_by_id"]
@@ -125,6 +128,21 @@ def student_structure_penalties(schedule, data, lookups, collect=False):
                 total += NO_EMPTY_DAY_PENALTY
                 if collect:
                     violations.append({"type": "empty_day", "detail": f"{gname_of(gid)}: יום ריק לחלוטין ({DAY_NAMES.get(day, day)})", "penalty": NO_EMPTY_DAY_PENALTY, "severity": "hard"})
+
+    # Holy subjects prefer the morning: a holy lesson placed after the threshold period (soft)
+    subject_by_id = lookups["subject_by_id"]
+    for ta in data["teacher_assignments"]:
+        req = requirement_by_id[ta["cur_requirement_id"]]
+        subj_name = subject_by_id.get(req["subject_id"], {}).get("subject_name", "")
+        if category_of(subj_name) != "holy":
+            continue
+        gid = req["student_group_id"]
+        for t in schedule[ta["id"]]:
+            ts = timeslot_by_id[t]
+            if ts["hour_of_day"] > HOLY_MORNING_THRESHOLD:
+                total += HOLY_MORNING_PENALTY
+                if collect:
+                    violations.append({"type": "holy_afternoon", "detail": f"{gname_of(gid)} / {subj_name}: לימוד קודש אחרי שעה {HOLY_MORNING_THRESHOLD} ({DAY_NAMES.get(ts['day_of_week'], ts['day_of_week'])} שעה {ts['hour_of_day']})", "penalty": HOLY_MORNING_PENALTY, "severity": "soft"})
 
     return total, violations
 
