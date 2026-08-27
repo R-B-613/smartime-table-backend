@@ -73,7 +73,7 @@ from scoring_config import (
 # Hill Climbing for a fair comparison. Tune independently later.
 GA_TIME_BUDGET_SECONDS = 60.0
 
-POPULATION_SIZE = 50
+POPULATION_SIZE = 100
 
 # Number of individuals sampled per tournament when selecting a parent.
 TOURNAMENT_SIZE = 5
