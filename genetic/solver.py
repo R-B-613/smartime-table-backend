@@ -702,3 +702,147 @@ def run_genetic(data: dict) -> dict:
         "schedule_entries": schedule_entries,
         "violations": violations,
     }
+
+
+def _make_seeded_population(data, lookups, timeslot_ids, seed_schedule,
+                            population_size, seed_fraction, seed_mutations,
+                            sync_groups):
+    """
+    Build the initial population: seed_fraction of it as lightly-mutated copies
+    of seed_schedule, the rest fully random.
+
+    Each seeded individual is a fresh copy of the CSP seed with `seed_mutations`
+    random single-slot moves applied (via the existing _mutate), so the seeded
+    portion is diverse rather than identical clones.
+    """
+    n_seeded = int(round(population_size * seed_fraction))
+    n_seeded = max(1, min(population_size, n_seeded))  # keep in [1, population_size]
+
+    population = []
+
+    # Seeded individuals: copy the seed, apply a few mutations for diversity.
+    for _ in range(n_seeded):
+        individual = {a_id: list(slots) for a_id, slots in seed_schedule.items()}
+        for _m in range(seed_mutations):
+            _mutate(individual, timeslot_ids, sync_groups=sync_groups)
+        population.append(individual)
+
+    # Remaining individuals: fully random (existing generator).
+    while len(population) < population_size:
+        population.append(
+            _generate_random_individual(data, lookups, timeslot_ids)
+        )
+
+    return population
+
+
+def run_genetic_from_seed(data: dict, seed_schedule: dict,
+                          time_budget_seconds: float = None,
+                          seed_fraction: float = 0.8,
+                          seed_mutations: int = 3) -> dict:
+    """
+    HYBRID entry point: Genetic Algorithm whose initial population is seeded from
+    the CSP schedule (default 80% seeded / 20% random), instead of 100% random.
+
+    Reuses the exact same GA loop and operators as run_genetic — only the
+    INITIAL POPULATION differs. Because most of the population starts around
+    CSP's feasible schedule, the GA optimises soft constraints from a feasible
+    base rather than struggling to reach feasibility at all.
+
+    Parameters
+    ----------
+    data : dict
+        The fetch_all_data() dict.
+    seed_schedule : dict
+        {assignment_id: [timeslot_id, ...]} — CSP's feasible schedule (from
+        hybrid_common.get_csp_seed).
+    time_budget_seconds : float, optional
+        Defaults to GA_TIME_BUDGET_SECONDS.
+    seed_fraction : float
+        Fraction of the population seeded from CSP (default 0.8 = 80/20).
+    seed_mutations : int
+        Random single-slot moves applied to each seeded individual for diversity.
+
+    Returns
+    -------
+    dict shaped like run_genetic()'s result, plus "seed_score":
+        {
+            "algorithm": "GENETIC_HYBRID",
+            "status": "COMPLETED",
+            "score": float,             # best score found
+            "seed_score": float,        # score of the CSP seed before GA
+            "schedule_entries": [...],
+            "violations": [...],
+        }
+    """
+    if time_budget_seconds is None:
+        time_budget_seconds = GA_TIME_BUDGET_SECONDS
+
+    lookups = _build_lookup_maps(data)
+    timeslot_ids = [ts["id"] for ts in data["timeslots"]]
+
+    # Pre-compute sync groups (same as run_genetic).
+    sync_groups = {}
+    for ta in data["teacher_assignments"]:
+        req = lookups["requirement_by_id"][ta["cur_requirement_id"]]
+        sbi = req.get("sync_block_identity")
+        if sbi is not None:
+            sync_groups.setdefault(sbi, []).append(ta["id"])
+
+    seed_score = _score_schedule(seed_schedule, data, lookups)
+
+    deadline = time.perf_counter() + time_budget_seconds
+
+    population = _make_seeded_population(
+        data, lookups, timeslot_ids, seed_schedule,
+        POPULATION_SIZE, seed_fraction, seed_mutations, sync_groups
+    )
+
+    # Start best = the seed itself, so the hybrid never does worse than CSP.
+    best_schedule = {a_id: list(slots) for a_id, slots in seed_schedule.items()}
+    best_score = seed_score
+
+    while time.perf_counter() < deadline:
+        population_with_scores = [
+            (individual, _score_schedule(individual, data, lookups))
+            for individual in population
+        ]
+        population_with_scores.sort(key=lambda pair: pair[1])
+
+        generation_best_schedule, generation_best_score = population_with_scores[0]
+        if generation_best_score < best_score:
+            best_schedule = generation_best_schedule
+            best_score = generation_best_score
+
+        if best_score == 0:
+            break
+
+        next_population = [
+            individual for individual, _score in population_with_scores[:ELITE_COUNT]
+        ]
+
+        while len(next_population) < POPULATION_SIZE:
+            if time.perf_counter() >= deadline:
+                break
+            parent_a = _tournament_select(population_with_scores)
+            parent_b = _tournament_select(population_with_scores)
+            child = _crossover(parent_a, parent_b, sync_groups=sync_groups)
+            if random.random() < MUTATION_RATE:
+                _mutate(child, timeslot_ids, sync_groups=sync_groups)
+            next_population.append(child)
+
+        population = next_population
+
+    schedule_entries = _assign_rooms(best_schedule, data, timeslot_ids)
+    _vtotal, violations = score_genetic_schedule_with_violations(
+        best_schedule, data, lookups
+    )
+
+    return {
+        "algorithm": "GENETIC_HYBRID",
+        "status": "COMPLETED",
+        "score": best_score,
+        "seed_score": seed_score,
+        "schedule_entries": schedule_entries,
+        "violations": violations,
+    }
