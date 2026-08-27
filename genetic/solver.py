@@ -82,7 +82,7 @@ TOURNAMENT_SIZE = 5
 ELITE_COUNT = 2
 
 # Probability that a given child undergoes mutation after crossover.
-MUTATION_RATE = 0.5
+MUTATION_RATE = 0.3
 
 # Fraction of mutations that are TARGETED (balance-attacking) vs random.
 # The rest stay random, to preserve exploration. Used by _mutate_targeted.
