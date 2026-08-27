@@ -73,7 +73,7 @@ from scoring_config import (
 # Hill Climbing for a fair comparison. Tune independently later.
 GA_TIME_BUDGET_SECONDS = 60.0
 
-POPULATION_SIZE = 100
+POPULATION_SIZE = 50
 
 # Number of individuals sampled per tournament when selecting a parent.
 TOURNAMENT_SIZE = 5
@@ -82,7 +82,7 @@ TOURNAMENT_SIZE = 5
 ELITE_COUNT = 2
 
 # Probability that a given child undergoes mutation after crossover.
-MUTATION_RATE = 0.3
+MUTATION_RATE = 0.2
 
 
 # ---------------------------------------------------------------------------
