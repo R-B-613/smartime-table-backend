@@ -161,6 +161,16 @@ def _add_student_contiguity_constraints(model, schedule_vars, data, lookups, tim
                 prev = sum(schedule_vars[(a_id, ts_by_day_hour[(day, hs[i - 1])])] for a_id in assignment_ids)
                 model.Add(cur <= prev)
 
+            # HARD: no empty day — each class must have >= 1 lesson every school day.
+            # This makes an empty day structurally impossible for CSP (forbidden,
+            # not merely penalised). HC/GA still score it via NO_EMPTY_DAY_PENALTY.
+            day_lessons = sum(
+                schedule_vars[(a_id, ts_by_day_hour[(day, h)])]
+                for a_id in assignment_ids
+                for h in hs
+            )
+            model.Add(day_lessons >= 1)
+
 def _add_structural_hard_constraints(model, schedule_vars, data, lookups, timeslots):
     """
     Adds constraints that are NEVER allowed to be broken: weekly_hours,
