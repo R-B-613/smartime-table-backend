@@ -86,7 +86,7 @@ MUTATION_RATE = 0.3
 
 # Fraction of mutations that are TARGETED (balance-attacking) vs random.
 # The rest stay random, to preserve exploration. Used by _mutate_targeted.
-TARGETED_MUTATION_FRACTION = 0.9
+TARGETED_MUTATION_FRACTION = 0.7
 
 # ---------------------------------------------------------------------------
 # Lookup maps (identical structure to csp/solver.py and hill_climbing/solver.py)
@@ -508,92 +508,90 @@ def _mutate(schedule, timeslot_ids, sync_groups=None):
 
 def _mutate_targeted(schedule, timeslot_ids, lookups, data, sync_groups=None):
     """
-    AGGRESSIVE targeted mutation aimed at reducing day-to-day imbalance (the
-    dominant penalty). With probability TARGETED_MUTATION_FRACTION it attacks
-    the MOST imbalanced class it can actually fix; otherwise it does a plain
-    random move (exploration).
- 
-    Attack:
-      1. Scan every class; for each, find its heavy day (most lessons) and
-         light day (fewest), and the imbalance = heavy_count - light_count.
-      2. Among classes whose light day has a FREE slot for that class and whose
-         imbalance >= 1, pick the one with the LARGEST imbalance.
-      3. Move up to 2 lessons from its heavy day to free slots on its light day.
- 
-    Sync-block assignments are skipped (left in place) for correctness; if the
-    chosen lesson is a sync member we just skip that particular lesson.
- 
-    In place, matching _mutate's contract.
+    TARGETED mutation aimed at reducing day-to-day imbalance (the dominant
+    penalty). With probability TARGETED_MUTATION_FRACTION it performs a
+    balance-directed move; otherwise it falls back to a plain random move
+    (identical to _mutate) to preserve exploration.
+
+    Balance-directed move:
+      1. Pick a random class (student group).
+      2. Find that class's lessons grouped by day.
+      3. Identify its most-loaded day and least-loaded day.
+      4. Move ONE lesson from the most-loaded day to a free slot on the
+         least-loaded day (for that class), reducing the spread.
+
+    Sync blocks: if the chosen lesson's assignment is part of a sync block, we
+    fall back to a random move for that case (moving a synced block while
+    respecting a specific target day/slot is more complex; keeping it simple and
+    correct here — sync members are rare in this dataset).
+
+    All moves are IN PLACE, matching _mutate's contract.
     """
+    # Fallback to plain random mutation part of the time (exploration).
     if random.random() > TARGETED_MUTATION_FRACTION:
         _mutate(schedule, timeslot_ids, sync_groups=sync_groups)
         return
- 
+
+    requirement_by_id = lookups["requirement_by_id"]
     timeslot_by_id = lookups["timeslot_by_id"]
+
+    # Group assignments by student group, and know each timeslot's (day, hour).
     assignments_by_group = lookups["assignments_by_group"]
- 
-    # timeslot ids grouped by day (for finding free target slots).
-    slots_by_day = {}
-    for ts_id in timeslot_ids:
-        d = timeslot_by_id[ts_id]["day_of_week"]
-        slots_by_day.setdefault(d, []).append(ts_id)
- 
-    # Helper: does this assignment belong to any sync group?
-    def _is_sync(a_id):
-        return bool(sync_groups) and any(a_id in ids for ids in sync_groups.values())
- 
-    # Scan all classes, compute imbalance + whether a fixing move exists.
-    best = None  # (imbalance, gid, heavy_day, light_day, day_lessons, occupied)
-    for gid, a_ids in assignments_by_group.items():
-        day_lessons = {}
-        occupied = set()
-        for a_id in a_ids:
-            for idx, t in enumerate(schedule[a_id]):
-                d = timeslot_by_id[t]["day_of_week"]
-                day_lessons.setdefault(d, []).append((a_id, idx, t))
-                occupied.add(t)
-        if len(day_lessons) < 2:
-            continue
-        days_sorted = sorted(day_lessons.keys(), key=lambda d: len(day_lessons[d]))
-        light_day, heavy_day = days_sorted[0], days_sorted[-1]
-        imbalance = len(day_lessons[heavy_day]) - len(day_lessons[light_day])
-        if imbalance < 1:
-            continue
-        # need at least one free slot for this class on the light day
-        free_light = [t for t in slots_by_day.get(light_day, []) if t not in occupied]
-        if not free_light:
-            continue
-        if best is None or imbalance > best[0]:
-            best = (imbalance, gid, heavy_day, light_day, day_lessons, occupied)
- 
-    if best is None:
-        # nothing fixable; explore instead
+    group_ids = list(assignments_by_group.keys())
+    if not group_ids:
         _mutate(schedule, timeslot_ids, sync_groups=sync_groups)
         return
- 
-    _imb, gid, heavy_day, light_day, day_lessons, occupied = best
- 
-    # Move up to 2 lessons from heavy -> light for this class.
-    heavy_lessons = list(day_lessons[heavy_day])
-    random.shuffle(heavy_lessons)
-    free_light = [t for t in slots_by_day.get(light_day, []) if t not in occupied]
-    random.shuffle(free_light)
- 
-    moves_made = 0
-    for (a_id, hour_index, _old_t) in heavy_lessons:
-        if moves_made >= 2 or not free_light:
-            break
-        if _is_sync(a_id):
-            continue  # skip sync members for correctness
-        new_t = free_light.pop()
-        schedule[a_id][hour_index] = new_t
-        occupied.discard(_old_t)
-        occupied.add(new_t)
-        moves_made += 1
- 
-    if moves_made == 0:
-        # e.g. all heavy lessons were sync members; explore instead
-        _mutate(schedule, timeslot_ids, sync_groups=sync_groups)
+
+    # Build day -> set(all timeslot_ids that day), for finding free target slots.
+    slots_by_day = {}
+    for ts_id in timeslot_ids:
+        ts = timeslot_by_id[ts_id]
+        slots_by_day.setdefault(ts["day_of_week"], []).append(ts_id)
+
+    # Try a few random classes until we find one with an imbalance to fix.
+    for _try in range(10):
+        gid = random.choice(group_ids)
+        a_ids = assignments_by_group[gid]
+
+        # Collect this class's occupied (day -> list of (assignment_id, hour_index, timeslot_id)).
+        day_lessons = {}
+        occupied_slots = set()  # timeslot_ids this class already uses (avoid clashes)
+        for a_id in a_ids:
+            for idx, t in enumerate(schedule[a_id]):
+                ts = timeslot_by_id[t]
+                day_lessons.setdefault(ts["day_of_week"], []).append((a_id, idx, t))
+                occupied_slots.add(t)
+
+        if len(day_lessons) < 2:
+            continue  # need at least two days to move between
+
+        # Most- and least-loaded days for this class.
+        days_sorted = sorted(day_lessons.keys(), key=lambda d: len(day_lessons[d]))
+        light_day = days_sorted[0]
+        heavy_day = days_sorted[-1]
+        if len(day_lessons[heavy_day]) - len(day_lessons[light_day]) < 2:
+            continue  # already fairly balanced for this class; try another
+
+        # Pick a lesson on the heavy day to move.
+        a_id, hour_index, _old_t = random.choice(day_lessons[heavy_day])
+
+        # Skip sync-block members (keep it simple/correct) -> random fallback.
+        if sync_groups and any(a_id in ids for ids in sync_groups.values()):
+            _mutate(schedule, timeslot_ids, sync_groups=sync_groups)
+            return
+
+        # Find a FREE slot on the light day for this class (not already used by it).
+        candidates = [t for t in slots_by_day.get(light_day, []) if t not in occupied_slots]
+        if not candidates:
+            continue  # light day full for this class; try another class
+
+        new_timeslot = random.choice(candidates)
+        schedule[a_id][hour_index] = new_timeslot
+        return  # done: one targeted move made
+
+    # If we couldn't find a good targeted move, fall back to random.
+    _mutate(schedule, timeslot_ids, sync_groups=sync_groups)
+
 
 
 # ---------------------------------------------------------------------------
