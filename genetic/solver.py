@@ -82,7 +82,7 @@ TOURNAMENT_SIZE = 5
 ELITE_COUNT = 2
 
 # Probability that a given child undergoes mutation after crossover.
-MUTATION_RATE = 0.2
+MUTATION_RATE = 0.5
 
 
 # ---------------------------------------------------------------------------
