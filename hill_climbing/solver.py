@@ -750,3 +750,81 @@ def run_hill_climbing(data: dict) -> dict:
         "schedule_entries": schedule_entries,
         "violations": violations,
     }
+
+
+def run_hill_climbing_from_seed(data: dict, seed_schedule: dict,
+                                time_budget_seconds: float = None) -> dict:
+    """
+    HYBRID entry point: Hill Climbing that starts from a GIVEN feasible schedule
+    (the CSP seed) instead of random restarts.
+
+    Reuses the exact same _climb / _assign_rooms / _score_schedule internals as
+    run_hill_climbing, so the optimisation behaviour is identical — only the
+    STARTING POINT differs. Repeatedly climbs from the seed (each climb explores
+    differently due to random neighbour sampling) until the budget is spent,
+    keeping the best schedule found.
+
+    Parameters
+    ----------
+    data : dict
+        The fetch_all_data() dict.
+    seed_schedule : dict
+        {assignment_id: [timeslot_id, ...]} — a feasible schedule to start from
+        (produced by CSP via hybrid_common.get_csp_seed).
+    time_budget_seconds : float, optional
+        How long to run. Defaults to the module constant
+        HILL_CLIMBING_TIME_BUDGET_SECONDS if not given.
+
+    Returns
+    -------
+    dict shaped like run_hill_climbing()'s result, plus a "seed_score" field so
+    the caller can see how much the seed improved:
+        {
+            "algorithm": "HILL_CLIMBING_HYBRID",
+            "status": "COMPLETED",
+            "score": float,             # best score after climbing
+            "seed_score": float,        # score of the CSP seed before climbing
+            "schedule_entries": [...],
+            "violations": [...],
+        }
+    """
+    if time_budget_seconds is None:
+        time_budget_seconds = HILL_CLIMBING_TIME_BUDGET_SECONDS
+
+    lookups = _build_lookup_maps(data)
+    timeslot_ids = [ts["id"] for ts in data["timeslots"]]
+
+    # Score the seed as-is, so we can report the improvement.
+    seed_score = _score_schedule(seed_schedule, data, lookups)
+
+    deadline = time.perf_counter() + time_budget_seconds
+
+    # Start best = the seed itself (so we never do WORSE than CSP's schedule).
+    best_schedule = {a_id: list(slots) for a_id, slots in seed_schedule.items()}
+    best_score = seed_score
+
+    while time.perf_counter() < deadline:
+        # Always climb from a fresh copy of the seed (feasible start every time).
+        start = {a_id: list(slots) for a_id, slots in seed_schedule.items()}
+        climbed_schedule, climbed_score = _climb(
+            start, data, lookups, timeslot_ids, deadline
+        )
+        if climbed_score < best_score:
+            best_schedule = climbed_schedule
+            best_score = climbed_score
+        if best_score == 0:
+            break
+
+    schedule_entries = _assign_rooms(best_schedule, data, timeslot_ids)
+    _vtotal, violations = score_genetic_schedule_with_violations(
+        best_schedule, data, lookups
+    )
+
+    return {
+        "algorithm": "HILL_CLIMBING_HYBRID",
+        "status": "COMPLETED",
+        "score": best_score,
+        "seed_score": seed_score,
+        "schedule_entries": schedule_entries,
+        "violations": violations,
+    }
