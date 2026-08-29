@@ -88,6 +88,12 @@ MUTATION_RATE = 0.3
 # The rest stay random, to preserve exploration. Used by _mutate_targeted.
 TARGETED_MUTATION_FRACTION = 0.7
 
+# Memetic: number of hill-climbing steps applied to each child before it
+# enters the population. Each step keeps a random single-slot move only if
+# it lowers the total score. 0 would disable local search entirely.
+LOCAL_SEARCH_STEPS = 15
+
+
 # ---------------------------------------------------------------------------
 # Lookup maps (identical structure to csp/solver.py and hill_climbing/solver.py)
 # ---------------------------------------------------------------------------
@@ -937,3 +943,130 @@ def run_genetic_from_seed(data: dict, seed_schedule: dict,
         "schedule_entries": schedule_entries,
         "violations": violations,
     }
+
+
+def _local_search(schedule, data, lookups, timeslot_ids, sync_groups,
+                  steps, current_score=None):
+    """
+    Embedded hill-climbing: perform up to `steps` random single-slot moves,
+    keeping each move ONLY if it strictly lowers the total score. Operates on a
+    COPY, returns (best_schedule, best_score).
+ 
+    Reuses the GA's own _mutate (for the move) and _score_schedule (for the
+    total), so it optimises the SAME unified objective as everything else —
+    balance, dismissal, holy, distribution, constraints, preferences — all at
+    once. That's what makes it safe: it can never accept a move that worsens the
+    total, unlike a forced targeted move.
+    """
+    best = {a_id: list(slots) for a_id, slots in schedule.items()}
+    best_score = current_score if current_score is not None else _score_schedule(best, data, lookups)
+ 
+    for _ in range(steps):
+        if best_score == 0:
+            break
+        # Propose one random single-slot move on a fresh copy.
+        candidate = {a_id: list(slots) for a_id, slots in best.items()}
+        _mutate(candidate, timeslot_ids, sync_groups=sync_groups)
+        cand_score = _score_schedule(candidate, data, lookups)
+        if cand_score < best_score:
+            best = candidate
+            best_score = cand_score
+ 
+    return best, best_score
+ 
+ 
+def run_genetic_memetic(data: dict, seed_schedule: dict,
+                        time_budget_seconds: float = None,
+                        seed_fraction: float = 0.8,
+                        seed_mutations: int = 3,
+                        local_search_steps: int = None) -> dict:
+    """
+    MEMETIC hybrid: identical to run_genetic_from_seed (CSP-seeded GA), but each
+    child is refined by _local_search (a few hill-climbing steps) before being
+    added to the next generation.
+ 
+    Everything else — seeded population, tournament selection, crossover,
+    mutation, elitism, best-starts-at-seed — is the same as run_genetic_from_seed
+    so the ONLY difference under test is the embedded local search.
+ 
+    Returns the same dict shape as run_genetic_from_seed, with
+    algorithm = "GENETIC_MEMETIC".
+    """
+    if time_budget_seconds is None:
+        time_budget_seconds = GA_TIME_BUDGET_SECONDS
+    if local_search_steps is None:
+        local_search_steps = LOCAL_SEARCH_STEPS
+ 
+    lookups = _build_lookup_maps(data)
+    timeslot_ids = [ts["id"] for ts in data["timeslots"]]
+ 
+    sync_groups = {}
+    for ta in data["teacher_assignments"]:
+        req = lookups["requirement_by_id"][ta["cur_requirement_id"]]
+        sbi = req.get("sync_block_identity")
+        if sbi is not None:
+            sync_groups.setdefault(sbi, []).append(ta["id"])
+ 
+    seed_score = _score_schedule(seed_schedule, data, lookups)
+    deadline = time.perf_counter() + time_budget_seconds
+ 
+    population = _make_seeded_population(
+        data, lookups, timeslot_ids, seed_schedule,
+        POPULATION_SIZE, seed_fraction, seed_mutations, sync_groups
+    )
+ 
+    # Best starts at the seed, so the memetic hybrid never does worse than CSP.
+    best_schedule = {a_id: list(slots) for a_id, slots in seed_schedule.items()}
+    best_score = seed_score
+ 
+    while time.perf_counter() < deadline:
+        population_with_scores = [
+            (individual, _score_schedule(individual, data, lookups))
+            for individual in population
+        ]
+        population_with_scores.sort(key=lambda pair: pair[1])
+ 
+        generation_best_schedule, generation_best_score = population_with_scores[0]
+        if generation_best_score < best_score:
+            best_schedule = generation_best_schedule
+            best_score = generation_best_score
+ 
+        if best_score == 0:
+            break
+ 
+        next_population = [
+            individual for individual, _score in population_with_scores[:ELITE_COUNT]
+        ]
+ 
+        while len(next_population) < POPULATION_SIZE:
+            if time.perf_counter() >= deadline:
+                break
+            parent_a = _tournament_select(population_with_scores)
+            parent_b = _tournament_select(population_with_scores)
+            child = _crossover(parent_a, parent_b, sync_groups=sync_groups)
+            if random.random() < MUTATION_RATE:
+                _mutate(child, timeslot_ids, sync_groups=sync_groups)
+            # --- MEMETIC STEP: polish the child with embedded hill-climbing ---
+            child, _child_score = _local_search(
+                child, data, lookups, timeslot_ids, sync_groups,
+                steps=local_search_steps
+            )
+            next_population.append(child)
+ 
+        population = next_population
+ 
+    schedule_entries = _assign_rooms(best_schedule, data, timeslot_ids)
+    _vtotal, violations = score_genetic_schedule_with_violations(
+        best_schedule, data, lookups
+    )
+ 
+    return {
+        "algorithm": "GENETIC_MEMETIC",
+        "status": "COMPLETED",
+        "score": best_score,
+        "seed_score": seed_score,
+        "schedule_entries": schedule_entries,
+        "violations": violations,
+    }
+
+
