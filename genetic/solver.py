@@ -91,7 +91,7 @@ TARGETED_MUTATION_FRACTION = 0.7
 # Memetic: number of hill-climbing steps applied to each child before it
 # enters the population. Each step keeps a random single-slot move only if
 # it lowers the total score. 0 would disable local search entirely.
-LOCAL_SEARCH_STEPS = 30
+LOCAL_SEARCH_STEPS = 50
 
 
 # ---------------------------------------------------------------------------
