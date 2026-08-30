@@ -44,7 +44,7 @@ from csp.solver import run_csp
 from hill_climbing.solver import run_hill_climbing
 from genetic.solver import run_genetic
 from genetic.solver import run_genetic_memetic
-from hybrid_common import get_csp_seed
+from hybrid_common import get_csp_seed, get_balanced_csp_seed
 
 
 # (name, function) in the same order main.py runs them.
@@ -193,7 +193,10 @@ def run_memetic_pipeline() -> dict:
     """
     data = fetch_all_data()
 
-    seed, _csp_result = get_csp_seed(data)
+    seed, _csp_result = get_balanced_csp_seed(data, max_spread=3)
+    if seed is None:
+        # Balanced CSP infeasible -> fall back to the plain CSP seed.
+        seed, _csp_result = get_csp_seed(data)
 
     memetic_result, perf = measure_performance(
         run_genetic_memetic, data, seed,
