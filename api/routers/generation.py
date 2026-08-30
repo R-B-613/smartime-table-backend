@@ -17,8 +17,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 
 from api.schemas import GenerationStartedResponse, GenerationStatusResponse
 from api.deps import get_current_admin, get_current_teacher
-from api.jobs import start_generation_job, get_job
-
+from api.jobs import start_generation_job, start_memetic_job, get_job
 
 router = APIRouter(prefix="/generation", tags=["generation"])
 
@@ -30,6 +29,20 @@ router = APIRouter(prefix="/generation", tags=["generation"])
 )
 def trigger_generation(admin: dict = Depends(get_current_admin)):
     job_id = start_generation_job()
+    if job_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="A generation run is already in progress",
+        )
+    return GenerationStartedResponse(job_id=job_id, status="running")
+
+@router.post(
+    "/run-memetic",
+    response_model=GenerationStartedResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def trigger_memetic_generation(admin: dict = Depends(get_current_admin)):
+    job_id = start_memetic_job()
     if job_id is None:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
