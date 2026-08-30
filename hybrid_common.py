@@ -86,16 +86,16 @@ def verify_seed_matches_csp(data):
     )
 
     def get_balanced_csp_seed(data, max_spread=3):
-    """
-    Like get_csp_seed, but runs the BALANCE-CONSTRAINED CSP (no class has more
-    than `max_spread` day-spread). Returns (seed_schedule_map, csp_result), or
-    (None, csp_result) if the balanced CSP is infeasible.
-    """
-    csp_result = run_csp_balanced(data, max_spread=max_spread)
-    if csp_result.get("score") is None or not csp_result.get("schedule_entries"):
-        return None, csp_result
-    seed_map = csp_entries_to_schedule_map(csp_result["schedule_entries"], data)
-    return seed_map, csp_result
+        """
+        Like get_csp_seed, but runs the BALANCE-CONSTRAINED CSP (no class has more
+        than `max_spread` day-spread). Returns (seed_schedule_map, csp_result), or
+        (None, csp_result) if the balanced CSP is infeasible.
+        """
+        csp_result = run_csp_balanced(data, max_spread=max_spread)
+        if csp_result.get("score") is None or not csp_result.get("schedule_entries"):
+            return None, csp_result
+        seed_map = csp_entries_to_schedule_map(csp_result["schedule_entries"], data)
+        return seed_map, csp_result
 
     # Compare against CSP's own violations count (same scorer, so should match).
     csp_violations = csp_result.get("violations") or []
