@@ -43,6 +43,8 @@ from comparator import save_and_select_best_result
 from csp.solver import run_csp
 from hill_climbing.solver import run_hill_climbing
 from genetic.solver import run_genetic
+from genetic.solver import run_genetic_memetic
+from hybrid_common import get_csp_seed
 
 
 # (name, function) in the same order main.py runs them.
@@ -171,3 +173,89 @@ def get_job(job_id: str):
     with _LOCK:
         job = _JOBS.get(job_id)
         return dict(job) if job is not None else None
+
+
+# ---------------------------------------------------------------------------
+# MEMETIC pipeline (CSP seed -> memetic GA). Saves ONLY the memetic result as
+# the current schedule. The standard three-algorithm run already provides the
+# deterministic CSP baseline, so the memetic button saves just the optimised
+# result.
+# ---------------------------------------------------------------------------
+
+MEMETIC_TIME_BUDGET_SECONDS = 120.0
+
+
+def run_memetic_pipeline() -> dict:
+    """
+    Fetches data once, gets a feasible CSP seed, runs the memetic GA from that
+    seed, saves the memetic result (and marks it current) via the comparator,
+    and returns a structured summary.
+    """
+    data = fetch_all_data()
+
+    seed, _csp_result = get_csp_seed(data)
+
+    memetic_result, perf = measure_performance(
+        run_genetic_memetic, data, seed,
+        time_budget_seconds=MEMETIC_TIME_BUDGET_SECONDS,
+    )
+
+    comparison = save_and_select_best_result([memetic_result])
+
+    return {
+        "comparison": comparison,
+        "metrics": {
+            "GENETIC_MEMETIC": {
+                "status": memetic_result["status"],
+                "score": memetic_result["score"],
+                "seed_score": memetic_result.get("seed_score"),
+                "runtime_seconds": perf["runtime_seconds"],
+                "peak_memory_mb": perf["peak_memory_mb"],
+            }
+        },
+    }
+
+
+def _memetic_worker(job_id: str) -> None:
+    try:
+        output = run_memetic_pipeline()
+        with _LOCK:
+            _JOBS[job_id].update(
+                status="completed",
+                finished_at=_now(),
+                result=output,
+            )
+    except Exception as exc:  # noqa: BLE001
+        with _LOCK:
+            _JOBS[job_id].update(
+                status="failed",
+                finished_at=_now(),
+                error=str(exc),
+            )
+
+
+def start_memetic_job():
+    """
+    Starts a memetic generation as a background job. Shares the _JOBS registry
+    and _LOCK with the standard pipeline, so the one-at-a-time rule covers BOTH:
+    if any generation (standard OR memetic) is running, this returns None and
+    the caller turns that into a 409.
+    """
+    with _LOCK:
+        already_running = any(j["status"] == "running" for j in _JOBS.values())
+        if already_running:
+            return None
+        job_id = uuid.uuid4().hex
+        _JOBS[job_id] = {
+            "job_id": job_id,
+            "status": "running",
+            "started_at": _now(),
+            "finished_at": None,
+            "result": None,
+            "error": None,
+        }
+
+    thread = threading.Thread(target=_memetic_worker, args=(job_id,), daemon=True)
+    thread.start()
+    return job_id
+
