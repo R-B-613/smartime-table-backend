@@ -528,3 +528,95 @@ def run_csp(data: dict) -> dict:
         "schedule_entries": schedule_entries,
         "violations": violations,
     }
+
+
+def _add_balance_hard_constraint(model, schedule_vars, data, lookups, timeslots, max_spread):
+    """
+    HARD balance constraint: for each class, (busiest day - lightest day) in
+    lesson count must be <= max_spread. Reuses the same per-(day,hour) BoolVar
+    sums as the other constraints. This is the ONLY structural difference from
+    the standard CSP.
+    """
+    assignments_by_group = lookups["assignments_by_group"]
+    hours_by_day = {}
+    ts_by_day_hour = {}
+    for ts in timeslots:
+        hours_by_day.setdefault(ts["day_of_week"], []).append(ts["hour_of_day"])
+        ts_by_day_hour[(ts["day_of_week"], ts["hour_of_day"])] = ts["id"]
+
+    for group_id, assignment_ids in assignments_by_group.items():
+        day_counts = []
+        for day, hours in hours_by_day.items():
+            cnt = model.NewIntVar(0, len(hours), f"bal_cnt_g{group_id}_d{day}")
+            model.Add(cnt == sum(
+                schedule_vars[(a_id, ts_by_day_hour[(day, h)])]
+                for a_id in assignment_ids for h in hours
+            ))
+            day_counts.append(cnt)
+        max_day = model.NewIntVar(0, 40, f"bal_max_g{group_id}")
+        min_day = model.NewIntVar(0, 40, f"bal_min_g{group_id}")
+        model.AddMaxEquality(max_day, day_counts)
+        model.AddMinEquality(min_day, day_counts)
+        model.Add(max_day - min_day <= max_spread)
+
+
+def run_csp_balanced(data: dict, max_spread: int = 3) -> dict:
+    """
+    Same as run_csp, but ALSO enforces a hard balance constraint: no class may
+    have more than `max_spread` hours difference between its busiest and lightest
+    day. Used to produce a BALANCED feasible seed for the memetic hybrid.
+
+    Returns the same dict shape as run_csp, with algorithm still "CSP" so the
+    seed conversion and scoring treat it identically. Returns status
+    "INFEASIBLE" (score None) if no schedule can satisfy the balance limit.
+    """
+    timeslots = data["timeslots"]
+    teacher_assignments = data["teacher_assignments"]
+
+    if not timeslots or not teacher_assignments:
+        return {
+            "algorithm": ALGO_CSP,
+            "status": "NO_DATA",
+            "score": None,
+            "schedule_entries": [],
+        }
+
+    lookups = _build_lookup_maps(data)
+
+    model = cp_model.CpModel()
+    schedule_vars = _create_decision_variables(model, teacher_assignments, timeslots)
+
+    _add_structural_hard_constraints(model, schedule_vars, data, lookups, timeslots)
+    _add_student_contiguity_constraints(model, schedule_vars, data, lookups, timeslots)
+    _add_balance_hard_constraint(model, schedule_vars, data, lookups, timeslots, max_spread)
+
+    solver = cp_model.CpSolver()
+    solver.parameters.max_time_in_seconds = CSP_MAX_SOLVE_SECONDS
+    status = solver.Solve(model)
+    status_name = solver.StatusName(status)
+
+    if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+        return {
+            "algorithm": ALGO_CSP,
+            "status": status_name,
+            "score": None,
+            "schedule_entries": [],
+        }
+
+    score = _compute_penalty_score(solver, schedule_vars, data, lookups, timeslots)
+    schedule_entries = _assign_rooms(solver, schedule_vars, data, timeslots)
+
+    csp_schedule = {ta["id"]: [] for ta in data["teacher_assignments"]}
+    for ta in data["teacher_assignments"]:
+        for ts in timeslots:
+            if solver.Value(schedule_vars[(ta["id"], ts["id"])]) == 1:
+                csp_schedule[ta["id"]].append(ts["id"])
+    _vtotal, violations = score_genetic_schedule_with_violations(csp_schedule, data, lookups)
+
+    return {
+        "algorithm": ALGO_CSP,
+        "status": status_name,
+        "score": score,
+        "schedule_entries": schedule_entries,
+        "violations": violations,
+    }
