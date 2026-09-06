@@ -129,3 +129,9 @@ HOLY_MORNING_THRESHOLD = 4  # holy lessons after period 4 are penalised
 # (longest day minus shortest day, beyond a tolerance). 
 BALANCE_PENALTY_PER_HOUR = 200
 BALANCE_TOLERANCE = 2  # a spread of up to 2 hours between days is free
+
+# STRONG-SOFT: a grade exceeding its admin-defined max lessons per day.
+# Per lesson over the cap, per class, per day. Set per grade in the DB table
+# grade_schedule_limits (managed from the admin UI). Grades with no row have
+# no cap (fail-safe). Soft on purpose — keeps tight schedules feasible.
+GRADE_MAX_PER_DAY_PENALTY_PER_HOUR = 100
