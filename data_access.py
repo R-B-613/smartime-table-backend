@@ -153,6 +153,13 @@ def fetch_all_data():
             """)
             data["teacher_preferences"] = cursor.fetchall()
 
+            cursor.execute("""
+                SELECT grade_level, max_lessons_per_day
+                FROM grade_schedule_limits
+                ORDER BY grade_level;
+            """)
+            data["grade_schedule_limits"] = cursor.fetchall()
+
     finally:
         conn.close()
 
