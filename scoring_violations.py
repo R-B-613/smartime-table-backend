@@ -65,6 +65,7 @@ def student_structure_penalties(schedule, data, lookups, collect=False):
         category_of,
         BALANCE_PENALTY_PER_HOUR,
         BALANCE_TOLERANCE,
+        GRADE_MAX_PER_DAY_PENALTY_PER_HOUR,
     )
 
     requirement_by_id = lookups["requirement_by_id"]
@@ -85,6 +86,13 @@ def student_structure_penalties(schedule, data, lookups, collect=False):
         for t in schedule[ta["id"]]:
             ts = timeslot_by_id[t]
             group_day_hours.setdefault((gid, ts["day_of_week"]), []).append(ts["hour_of_day"])
+
+    # Admin-defined max lessons per day, keyed by grade number (from the DB).
+    # Grades with no row get no cap (fail-safe).
+    max_per_day_by_grade = {
+        row["grade_level"]: row["max_lessons_per_day"]
+        for row in data.get("grade_schedule_limits", [])
+    }
 
     for (gid, day), hours in group_day_hours.items():
         hs = sorted(set(hours))
@@ -117,6 +125,17 @@ def student_structure_penalties(schedule, data, lookups, collect=False):
                 total += pen
                 if collect:
                     violations.append({"type": "grade_dismissal", "detail": f"{gname_of(gid)} (שכבה {grade}): {len(late)} שיעורים אחרי שעת הסיום ({dismissal}) ביום {DAY_NAMES.get(day, day)}", "penalty": pen, "severity": "soft"})
+
+        # Admin-defined max lessons per day for this grade (strong-soft).
+        # hs already holds this class's distinct lesson-periods for the day.
+        if grade is not None and grade in max_per_day_by_grade:
+            cap = max_per_day_by_grade[grade]
+            over = len(hs) - cap
+            if over > 0:
+                pen = over * GRADE_MAX_PER_DAY_PENALTY_PER_HOUR
+                total += pen
+                if collect:
+                    violations.append({"type": "grade_max_per_day", "detail": f"{gname_of(gid)} (שכבה {grade}): {len(hs)} שיעורים ביום {DAY_NAMES.get(day, day)}, מעל המקסימום ({cap})", "penalty": pen, "severity": "soft"})
 
     # No empty day: every class must have at least one lesson on each school day (hard)
     school_days = sorted({ts["day_of_week"] for ts in data["timeslots"]})
