@@ -2,4 +2,9 @@ __pycache__/
 .venv/
 .env
 app/
+<<<<<<< HEAD
 *.csv
+=======
+*.csv
+start_api.sh
+>>>>>>> d3b51ce408ab5a644b0f8807142f83e407e724fe

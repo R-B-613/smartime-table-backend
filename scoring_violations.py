@@ -56,7 +56,16 @@ def student_structure_penalties(schedule, data, lookups, collect=False):
     from scoring_config import (
         STUDENT_GAP_PENALTY,
         STUDENT_LATE_START_PENALTY,
-        YOUNG_GRADE_LATE_PENALTY,
+        GRADE_DISMISSAL,
+        DEFAULT_DISMISSAL,
+        DISMISSAL_PENALTY_PER_HOUR,
+        NO_EMPTY_DAY_PENALTY,
+        HOLY_MORNING_PENALTY,
+        HOLY_MORNING_THRESHOLD,
+        category_of,
+        BALANCE_PENALTY_PER_HOUR,
+        BALANCE_TOLERANCE,
+        GRADE_MAX_PER_DAY_PENALTY_PER_HOUR,
     )
 
     requirement_by_id = lookups["requirement_by_id"]
@@ -77,6 +86,13 @@ def student_structure_penalties(schedule, data, lookups, collect=False):
         for t in schedule[ta["id"]]:
             ts = timeslot_by_id[t]
             group_day_hours.setdefault((gid, ts["day_of_week"]), []).append(ts["hour_of_day"])
+
+    # Admin-defined max lessons per day, keyed by grade number (from the DB).
+    # Grades with no row get no cap (fail-safe).
+    max_per_day_by_grade = {
+        row["grade_level"]: row["max_lessons_per_day"]
+        for row in data.get("grade_schedule_limits", [])
+    }
 
     for (gid, day), hours in group_day_hours.items():
         hs = sorted(set(hours))
@@ -99,15 +115,70 @@ def student_structure_penalties(schedule, data, lookups, collect=False):
             if collect:
                 violations.append({"type": "student_late_start", "detail": f"{gname_of(gid)}: לא מתחיל בשעה 1 ביום {DAY_NAMES.get(day, day)} (מתחיל בשעה {first})", "penalty": pen, "severity": "hard"})
 
-        # Young grades (1-3) finishing in periods 7-8 (soft)
+        # Per-grade dismissal: lessons past the grade's last allowed period (strong-soft)
         grade = grade_of(gname_of(gid))
-        if grade is not None and grade <= 3:
-            late = [h for h in hs if h >= 7]
+        if grade is not None:
+            dismissal = GRADE_DISMISSAL.get(grade, DEFAULT_DISMISSAL)
+            late = [h for h in hs if h > dismissal]
             if late:
-                pen = len(late) * YOUNG_GRADE_LATE_PENALTY
+                pen = len(late) * DISMISSAL_PENALTY_PER_HOUR
                 total += pen
                 if collect:
-                    violations.append({"type": "young_grade_late", "detail": f"{gname_of(gid)} (שכבה {grade}): {len(late)} שיעורים בשעות 7-8 ביום {DAY_NAMES.get(day, day)}", "penalty": pen, "severity": "soft"})
+                    violations.append({"type": "grade_dismissal", "detail": f"{gname_of(gid)} (שכבה {grade}): {len(late)} שיעורים אחרי שעת הסיום ({dismissal}) ביום {DAY_NAMES.get(day, day)}", "penalty": pen, "severity": "soft"})
+
+        # Admin-defined max lessons per day for this grade (strong-soft).
+        # hs already holds this class's distinct lesson-periods for the day.
+        if grade is not None and grade in max_per_day_by_grade:
+            cap = max_per_day_by_grade[grade]
+            over = len(hs) - cap
+            if over > 0:
+                pen = over * GRADE_MAX_PER_DAY_PENALTY_PER_HOUR
+                total += pen
+                if collect:
+                    violations.append({"type": "grade_max_per_day", "detail": f"{gname_of(gid)} (שכבה {grade}): {len(hs)} שיעורים ביום {DAY_NAMES.get(day, day)}, מעל המקסימום ({cap})", "penalty": pen, "severity": "soft"})
+
+    # No empty day: every class must have at least one lesson on each school day (hard)
+    school_days = sorted({ts["day_of_week"] for ts in data["timeslots"]})
+    all_group_ids = {
+        requirement_by_id[ta["cur_requirement_id"]]["student_group_id"]
+        for ta in data["teacher_assignments"]
+    }
+    for gid in all_group_ids:
+        for day in school_days:
+            if (gid, day) not in group_day_hours:
+                total += NO_EMPTY_DAY_PENALTY
+                if collect:
+                    violations.append({"type": "empty_day", "detail": f"{gname_of(gid)}: יום ריק לחלוטין ({DAY_NAMES.get(day, day)})", "penalty": NO_EMPTY_DAY_PENALTY, "severity": "hard"})
+
+    # Holy subjects prefer the morning: a holy lesson placed after the threshold period (soft)
+    subject_by_id = lookups["subject_by_id"]
+    for ta in data["teacher_assignments"]:
+        req = requirement_by_id[ta["cur_requirement_id"]]
+        subj_name = subject_by_id.get(req["subject_id"], {}).get("subject_name", "")
+        if category_of(subj_name) != "holy":
+            continue
+        gid = req["student_group_id"]
+        for t in schedule[ta["id"]]:
+            ts = timeslot_by_id[t]
+            if ts["hour_of_day"] > HOLY_MORNING_THRESHOLD:
+                total += HOLY_MORNING_PENALTY
+                if collect:
+                    violations.append({"type": "holy_afternoon", "detail": f"{gname_of(gid)} / {subj_name}: לימוד קודש אחרי שעה {HOLY_MORNING_THRESHOLD} ({DAY_NAMES.get(ts['day_of_week'], ts['day_of_week'])} שעה {ts['hour_of_day']})", "penalty": HOLY_MORNING_PENALTY, "severity": "soft"})
+
+    # Balanced daily load: penalise big day-to-day swings in a class's lesson count (soft)
+    group_daily_counts = {}
+    for (gid, day), hours in group_day_hours.items():
+        group_daily_counts.setdefault(gid, []).append(len(set(hours)))
+    for gid, counts in group_daily_counts.items():
+        # only compare across the days the class actually has lessons
+        if len(counts) < 2:
+            continue
+        spread = max(counts) - min(counts)
+        if spread > BALANCE_TOLERANCE:
+            pen = (spread - BALANCE_TOLERANCE) * BALANCE_PENALTY_PER_HOUR
+            total += pen
+            if collect:
+                violations.append({"type": "daily_balance", "detail": f"{gname_of(gid)}: פער של {spread} שעות בין היום הארוך לקצר", "penalty": pen, "severity": "soft"})
 
     return total, violations
 
